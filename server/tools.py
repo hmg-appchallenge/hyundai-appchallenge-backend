@@ -7,6 +7,7 @@ python -m server.tools tunnel-check [주소] : 공개 주소(안 주면 share-se
 python -m server.tools hf-token-save [초] : 클립보드에 복사한 허깅페이스 토큰을 확인해 hf-token.txt로 저장하고 클립보드를 비운다 (초를 주면 그동안 복사를 기다림, 토큰은 화면에 안 보여 줌)
 python -m server.tools kr-key-copy [초]   : 팀 키(KR_API_KEY)를 클립보드에 넣고, 초(기본 90)가 지나면 비운다 (카톡으로 팀원에게 보낼 때, 값은 안 보여 줌)
 python -m server.tools hf-secrets SPACE  : ai-keys.env의 키 3개를 Space Secrets에, MOCK_GENERATION=0을 Variables에 넣는다 (값은 안 보여 줌)
+python -m server.tools hf-pause SPACE    : Space를 멈춘다 (멈춘 동안 요금 안 나감)
 python -m server.tools hf-deploy SPACE   : deploy/hf-space.tar를 허깅페이스 Space에 올린다 (토큰은 hf-token.txt, 화면에 안 보여 줌)
 python -m server.tools hf-status SPACE   : Space가 빌드 중인지, 켜졌는지 본다
 python -m server.tools hf-logs SPACE [build|run] : Space 빌드·실행 기록 끝부분을 본다
@@ -649,6 +650,24 @@ def hf_deploy(space: str) -> int:
     return 0
 
 
+def hf_pause(space: str) -> int:
+    """Space를 멈춘다. 멈춘 동안은 하드웨어 요금이 안 나간다. 다시 켜려면 Space 설정의 Restart."""
+    from huggingface_hub import HfApi
+
+    token = _hf_token()
+    if not token:
+        return 1
+    api = HfApi(token=token)
+    space = _hf_space(api, space)
+    try:
+        rt = api.pause_space(space)
+    except Exception as e:
+        print(f"멈추지 못했어요: {type(e).__name__} {_http_status(e)}")
+        return 1
+    print(f"{space}: stage={rt.stage} (멈춤, 요금 안 나감)")
+    return 0
+
+
 def hf_status(space: str) -> int:
     from huggingface_hub import HfApi
 
@@ -720,7 +739,7 @@ def main(argv=None) -> int:
         return kr_key_copy(float(argv[1]) if len(argv) > 1 else 90.0)
     if argv and argv[0] == "hf-token-save":
         return hf_token_save(float(argv[1]) if len(argv) > 1 else 0.0)
-    if argv and argv[0] in ("hf-deploy", "hf-status", "hf-logs", "hf-secrets"):
+    if argv and argv[0] in ("hf-deploy", "hf-status", "hf-logs", "hf-secrets", "hf-pause"):
         if len(argv) < 2:
             print(f"Space 이름이 필요해요: python -m server.tools {argv[0]} kidsrhythm-server")
             return 2
@@ -730,6 +749,8 @@ def main(argv=None) -> int:
             return hf_status(argv[1])
         if argv[0] == "hf-secrets":
             return hf_secrets(argv[1])
+        if argv[0] == "hf-pause":
+            return hf_pause(argv[1])
         return hf_logs(argv[1], argv[2] if len(argv) > 2 else "build")
     if argv and argv[0] == "words-probe":
         names = [a for a in argv[1:] if a != "fast"]
