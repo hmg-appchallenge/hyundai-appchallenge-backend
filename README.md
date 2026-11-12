@@ -1,11 +1,11 @@
 # 차량 리듬 동요 노래 생성 서버
 
-Pleos Connect Kids 앱 "차량 리듬 동요"의 노래 생성 서버(AI·백엔드)예요. 앱(프론트엔드)은 같은 저장소의 `main` 브랜치에 있고, 둘이 주고받는 형식은 [docs/API.md](docs/API.md)예요.
+Pleos Connect Kids 앱 "차량 리듬 동요"의 노래 생성 서버(AI·백엔드)예요. 앱(프론트엔드)은 [hyundai-appchallenge-frontend](https://github.com/hmg-appchallenge/hyundai-appchallenge-frontend)에 있고, 둘이 주고받는 형식은 [docs/API.md](docs/API.md)예요.
 
-서버 코드는 앱 코드와 섞이지 않게 이 저장소의 `backend` 브랜치에 따로 두었어요. 서버 PC에서는 이 브랜치만 받으면 돼요.
+서버 PC에서는 이 저장소를 받으면 돼요.
 
 ```bat
-git clone -b backend https://github.com/hmg-appchallenge/hyundai-appchallenge-frontend.git kidsrhythm-server
+git clone https://github.com/mnunu123/backend.git kidsrhythm-server
 ```
 
 ## 하는 일
