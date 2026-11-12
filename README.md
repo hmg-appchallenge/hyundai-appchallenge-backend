@@ -5,7 +5,7 @@ Pleos Connect Kids 앱 "차량 리듬 동요"의 노래 생성 서버(AI·백엔
 서버 PC에서는 이 저장소를 받으면 돼요.
 
 ```bat
-git clone https://github.com/mnunu123/backend.git kidsrhythm-server
+git clone https://github.com/hmg-appchallenge/hyundai-appchallenge-backend.git kidsrhythm-server
 ```
 
 ## 하는 일
