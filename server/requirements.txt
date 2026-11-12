@@ -1,0 +1,5 @@
+# 노래 생성 서버 (ai\requirements.txt 위에 더 설치한다)
+fastapi>=0.110,<1
+uvicorn>=0.29,<1
+python-multipart>=0.0.9
+sherpa-onnx>=1.10,<3

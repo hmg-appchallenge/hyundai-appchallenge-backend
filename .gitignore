@@ -1,0 +1,22 @@
+# 키·토큰 (절대 올리지 않음)
+ai-keys.env
+hf-token.txt
+
+# 실행하면서 생기는 것
+server-url.txt
+logs/
+agent/
+server/tmp/
+__pycache__/
+*.pyc
+
+# AI 환경·모델·결과 (setup-ai.bat이 만든다)
+ai/.venv/
+ai/models/
+ai/input/
+ai/output/
+ai/logs/
+
+# 내려받은 도구와 배포 묶음
+tools/
+deploy/*.tar
