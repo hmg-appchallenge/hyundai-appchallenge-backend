@@ -580,12 +580,52 @@ def kr_key_copy(keep_sec: float = 90.0) -> int:
     return 0
 
 
+def kr_key_new(keys_file: Path | None = None) -> int:
+    """새 팀 키(KR_API_KEY)를 만들어 ai-keys.env에 적는다. 예전 키 줄은 새 키로 바뀐다. 키 값은 화면에 남기지 않는다.
+
+    앱 APK에 들어간 팀 키가 새었을 때 쓴다. 바꾼 뒤에는 서버(Space Secret)와 앱 빌드에도 새 키를 넣어야 한다.
+    """
+    import re
+    import secrets
+    import string
+
+    from .config import KEYS_FILE
+
+    path = Path(keys_file or KEYS_FILE)
+    raw = path.read_bytes() if path.exists() else b""
+    bom = raw.startswith(b"\xef\xbb\xbf")
+    text = raw.decode("utf-8-sig")
+    nl = "\r\n" if "\r\n" in text else "\n"
+    key = "kr-" + "".join(secrets.choice(string.ascii_letters + string.digits) for _ in range(24))
+    line = f"KR_API_KEY={key}"
+    # 주석이 아닌 KR_API_KEY 줄을 모두 바꾼다 (줄바꿈 문자는 그대로 둔다)
+    pattern = re.compile(r"^[ \t]*KR_API_KEY[ \t]*=[^\r\n]*", re.M)
+    text, n = pattern.subn(lambda _m: line, text)
+    if not n:
+        if text and not text.endswith("\n"):
+            text += nl
+        text += line + nl
+    path.write_bytes((b"\xef\xbb\xbf" if bom else b"") + text.encode("utf-8"))
+    print(f"새 팀 키를 {path.name}의 KR_API_KEY에 {'바꿔' if n else '새로'} 적었어요 (kr-****, {len(key)}자)")
+    return 0
+
+
 SPACE_SECRETS = ("ANTHROPIC_API_KEY", "ELEVENLABS_API_KEY", "KR_API_KEY")
 
 
-def hf_secrets(space: str) -> int:
-    """ai-keys.env의 키 3개를 Space Secrets에, MOCK_GENERATION=0을 Variables에 넣는다. 키 값은 화면에 남기지 않는다."""
+def hf_secrets(space: str, names: list[str] | None = None) -> int:
+    """ai-keys.env의 키를 Space Secrets에 넣는다. 키 값은 화면에 남기지 않는다.
+
+    names를 주면 그 키만 바꾸고 나머지 Secret과 Variable은 그대로 둔다.
+    안 주면 키 3개를 모두 넣고 Variables에 MOCK_GENERATION=0을 넣는다.
+    """
     import os
+
+    chosen = tuple(names) if names else SPACE_SECRETS
+    unknown = [k for k in chosen if k not in SPACE_SECRETS]
+    if unknown:
+        print("넣을 수 있는 키가 아니에요:", ", ".join(unknown), f"(가능: {', '.join(SPACE_SECRETS)})")
+        return 2
 
     from huggingface_hub import HfApi
 
@@ -596,19 +636,21 @@ def hf_secrets(space: str) -> int:
     if not token:
         return 1
     load_keys(KEYS_FILE)
-    missing = [k for k in SPACE_SECRETS if not os.environ.get(k, "").strip()]
+    missing = [k for k in chosen if not os.environ.get(k, "").strip()]
     if missing:
         print("ai-keys.env에 없는 키:", ", ".join(missing))
         return 1
     api = HfApi(token=token)
     space = _hf_space(api, space)
-    for name in SPACE_SECRETS:
+    for name in chosen:
         try:
             api.add_space_secret(space, name, os.environ[name].strip())
         except Exception as e:
             print(f"Secret {name}: 실패 {type(e).__name__} {_http_status(e)}")
             return 1
         print(f"Secret {name}: 넣음")
+    if names:
+        return 0
     try:
         api.add_space_variable(space, "MOCK_GENERATION", "0")
     except Exception as e:
@@ -665,6 +707,24 @@ def hf_pause(space: str) -> int:
         print(f"멈추지 못했어요: {type(e).__name__} {_http_status(e)}")
         return 1
     print(f"{space}: stage={rt.stage} (멈춤, 요금 안 나감)")
+    return 0
+
+
+def hf_restart(space: str) -> int:
+    """멈춘 Space를 다시 켠다. 켜져 있는 동안 고른 하드웨어 요금이 나간다 (CPU upgrade는 시간당 $0.03)."""
+    from huggingface_hub import HfApi
+
+    token = _hf_token()
+    if not token:
+        return 1
+    api = HfApi(token=token)
+    space = _hf_space(api, space)
+    try:
+        rt = api.restart_space(space)
+    except Exception as e:
+        print(f"다시 켜지 못했어요: {type(e).__name__} {_http_status(e)}")
+        return 1
+    print(f"{space}: stage={rt.stage} hardware={rt.requested_hardware} (빌드가 끝나면 RUNNING이 돼요)")
     return 0
 
 
@@ -737,9 +797,11 @@ def main(argv=None) -> int:
         return tunnel_check(argv[1] if len(argv) > 1 else None)
     if argv and argv[0] == "kr-key-copy":
         return kr_key_copy(float(argv[1]) if len(argv) > 1 else 90.0)
+    if argv and argv[0] == "kr-key-new":
+        return kr_key_new()
     if argv and argv[0] == "hf-token-save":
         return hf_token_save(float(argv[1]) if len(argv) > 1 else 0.0)
-    if argv and argv[0] in ("hf-deploy", "hf-status", "hf-logs", "hf-secrets", "hf-pause"):
+    if argv and argv[0] in ("hf-deploy", "hf-status", "hf-logs", "hf-secrets", "hf-pause", "hf-restart"):
         if len(argv) < 2:
             print(f"Space 이름이 필요해요: python -m server.tools {argv[0]} kidsrhythm-server")
             return 2
@@ -748,9 +810,11 @@ def main(argv=None) -> int:
         if argv[0] == "hf-status":
             return hf_status(argv[1])
         if argv[0] == "hf-secrets":
-            return hf_secrets(argv[1])
+            return hf_secrets(argv[1], argv[2:] or None)
         if argv[0] == "hf-pause":
             return hf_pause(argv[1])
+        if argv[0] == "hf-restart":
+            return hf_restart(argv[1])
         return hf_logs(argv[1], argv[2] if len(argv) > 2 else "build")
     if argv and argv[0] == "words-probe":
         names = [a for a in argv[1:] if a != "fast"]

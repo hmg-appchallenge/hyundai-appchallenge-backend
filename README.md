@@ -63,7 +63,7 @@ rem 켜진 서버에 앱처럼 요청해 보기: 목소리 등록 → 녹음 세
 ai\.venv\Scripts\python -m server.smoketest
 rem 바깥 주소로 시험할 때는 팀 키를 ai-keys.env에서 붙여요
 ai\.venv\Scripts\python -m server.smoketest --base https://...
-rem 횟수 제한·제목 길이 단위 시험 (모델 없이 돌아요)
+rem 횟수 제한·제목 길이·팀 키 바꾸기 단위 시험 (모델 없이 돌아요)
 ai\.venv\Scripts\python -m unittest discover -s tests
 rem 키가 되는지, 바깥에서 붙는지 (키 값은 화면에 안 보여 줘요)
 ai\.venv\Scripts\python -m server.tools check-keys
@@ -108,9 +108,20 @@ tools\cloudflared.exe tunnel run --url http://127.0.0.1:8000 kidsrhythm
 - 심사 기간에는 Windows 업데이트 재시작을 미뤄 둬요.
 - 노트북·데스크톱 CPU로 돌리면 한 곡에 1분쯤 걸리고, 녹음 중 '들린 단어'가 늦게 떠요 (받아쓰기 한 번에 30초 안팎).
 
-### 클라우드 (참고)
+### 방법 3. Hugging Face Space (서버 PC 없이)
 
-`deploy/huggingface`의 세 파일과 `server/`, `ai/songmaker/`, `docs/`를 한 폴더에 모으면 Hugging Face Docker Space로 올릴 수 있어요. 11/12에 CPU upgrade(8코어)로 올렸을 때 한 곡에 20초 안팎 걸렸고, 지금 그 Space는 멈춰 뒀어요 (켜 두면 시간당 $0.03).
+`deploy/huggingface`의 파일(Dockerfile, Space 카드 README, requirements)과 `server/`, `ai/songmaker/`, `docs/`를 한 묶음(`deploy/hf-space.tar`)으로 만들어 Docker Space에 올려요. CPU upgrade(8코어)에서 한 곡에 20초 안팎 걸리고, 켜 두면 시간당 $0.03이에요. 허깅페이스 토큰은 `hf-token.txt`에 두고(`hf-token-save`가 클립보드에서 받아 저장해요), 아래 명령이 그 토큰을 써요.
+
+| 할 일 | 명령 (`ai\.venv\Scripts\python -m server.tools …`) |
+|---|---|
+| 팀 키 새로 만들기 (키가 샜을 때) | `kr-key-new` → `ai-keys.env`의 `KR_API_KEY` 줄만 바뀌고, 키 값은 화면에 안 나와요 |
+| 키를 Space Secret에 넣기 | `hf-secrets kidsrhythm-server` (키 3개와 `MOCK_GENERATION=0`), `hf-secrets kidsrhythm-server KR_API_KEY` (팀 키만) |
+| 코드 올리기 | `hf-deploy kidsrhythm-server` (묶음에 없는 파일은 Space에서 지워져요) |
+| 켜기 · 멈추기 · 상태 | `hf-restart` · `hf-pause` · `hf-status` 뒤에 `kidsrhythm-server` |
+| 빌드·실행 기록 | `hf-logs kidsrhythm-server build` (또는 `run`) |
+
+- 멈춘 동안은 요금이 안 나가요. 멈춘 Space에 코드를 올리거나 Secret을 바꿔도 멈춘 채로 있어서, 다 바꾼 뒤 `hf-restart`로 켜면 돼요 (11/14 확인).
+- 팀 키를 바꾸면 앱 `local.properties`의 `kidsrhythm.apiKey`도 새 키로 바꿔 다시 빌드해야 해요. 팀원에게는 `kr-key-copy`로 클립보드에 넣어 따로 보내요.
 
 ## 노래 만들기 한도
 
