@@ -120,7 +120,9 @@ tools\cloudflared.exe tunnel run --url http://127.0.0.1:8000 kidsrhythm
 | 켜기 · 멈추기 · 상태 | `hf-restart` · `hf-pause` · `hf-status` 뒤에 `kidsrhythm-server` |
 | 빌드·실행 기록 | `hf-logs kidsrhythm-server build` (또는 `run`) |
 
+- 11/14부터 심사용 서버는 이 Space(`https://awqdqwd-kidsrhythm-server.hf.space`, 0.5.0)예요. 팀 키도 이날 새로 바꿨어요. 예전 키는 공개된 APK에 들어가 있어서 다시 쓰지 않아요.
 - 멈춘 동안은 요금이 안 나가요. 멈춘 Space에 코드를 올리거나 Secret을 바꿔도 멈춘 채로 있어서, 다 바꾼 뒤 `hf-restart`로 켜면 돼요 (11/14 확인).
+- 개인 계정에서 Docker Space를 만들려면 PRO가 필요해요. PRO가 끝난 뒤에도 Space가 계속 도는지는 허깅페이스 문서에 나와 있지 않으니, 심사·전시 기간 중에 PRO가 끝나지 않는지 확인해요.
 - 팀 키를 바꾸면 앱 `local.properties`의 `kidsrhythm.apiKey`도 새 키로 바꿔 다시 빌드해야 해요. 팀원에게는 `kr-key-copy`로 클립보드에 넣어 따로 보내요.
 
 ## 노래 만들기 한도
