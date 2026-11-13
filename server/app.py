@@ -14,6 +14,7 @@ from .audio_io import BadAudio, decode
 from .config import (CHUNK_MS, INSTRUMENTS, KEEP_SEC, MAX_MEMBERS, MAX_RECORDING_SEC, MIN_ENROLL_SPEECH_SEC,
                      SHERPA_DIR, SR_IN)
 from .jobs import Store
+from .limits import SongLimiter, client_ip
 from .live import Member
 from .speaker import speech_report
 
@@ -86,6 +87,18 @@ def create_app(store: Store, api_key: str | None = None, log=print) -> FastAPI:
     async def _api_error(_request: Request, exc: ApiError):
         return error(exc.status, exc.code, exc.message)
 
+    limiter = SongLimiter()
+
+    def _take_song(request: Request) -> None:
+        """바깥에서 온 요청이면 노래 한 곡을 센다. 같은 PC에서 바로 온 요청(에뮬레이터 개발)은 세지 않는다."""
+        host = request.client.host if request.client else None
+        if not needs_key(host, request.headers):
+            return
+        reason = limiter.try_take(client_ip(request.headers, host))
+        if reason:
+            log(f"[제한] {reason}")
+            raise ApiError(429, "RATE_LIMITED", reason)
+
     @app.middleware("http")
     async def _auth(request: Request, call_next):
         path = request.url.path
@@ -98,7 +111,8 @@ def create_app(store: Store, api_key: str | None = None, log=print) -> FastAPI:
 
     @app.get("/v1/health")
     async def health():
-        return {"ok": True, "version": __version__, "auth": bool(api_key), **engine.status()}
+        return {"ok": True, "version": __version__, "auth": bool(api_key), **engine.status(),
+                "limits": limiter.status()}
 
     # ---------- 2. 목소리 특징 ----------
     def _embed(data: bytes) -> dict:
@@ -170,6 +184,7 @@ def create_app(store: Store, api_key: str | None = None, log=print) -> FastAPI:
             return {"songId": job.id, "status": job.status}
         s = _session(sid)
         body = await _json(request)
+        _take_song(request)
         job = store.start_job(s, body.get("drive"), body.get("beat"))
         log(f"[세션 {sid}] 완성하기 -> 노래 {job.id}")
         return {"songId": job.id, "status": job.status}
@@ -181,7 +196,7 @@ def create_app(store: Store, api_key: str | None = None, log=print) -> FastAPI:
 
     # ---------- 4. 파일 하나로 ----------
     @app.post("/v1/songs", status_code=202)
-    async def create_song(recording: UploadFile = File(...), meta: str = Form("{}")):
+    async def create_song(request: Request, recording: UploadFile = File(...), meta: str = Form("{}")):
         try:
             info = json.loads(meta or "{}")
         except json.JSONDecodeError:
@@ -194,6 +209,7 @@ def create_app(store: Store, api_key: str | None = None, log=print) -> FastAPI:
             raise ApiError(400, "BAD_AUDIO", str(e))
         if len(audio) / SR_IN > MAX_RECORDING_SEC + 1:
             raise ApiError(413, "TOO_LONG", f"녹음이 {MAX_RECORDING_SEC // 60}분을 넘었어요")
+        _take_song(request)
         job = await run_in_threadpool(store.start_job_from_audio, audio, members, info.get("drive"), info.get("beat"))
         return {"songId": job.id, "status": job.status}
 

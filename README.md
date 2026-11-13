@@ -63,6 +63,8 @@ rem 켜진 서버에 앱처럼 요청해 보기: 목소리 등록 → 녹음 세
 ai\.venv\Scripts\python -m server.smoketest
 rem 바깥 주소로 시험할 때는 팀 키를 ai-keys.env에서 붙여요
 ai\.venv\Scripts\python -m server.smoketest --base https://...
+rem 횟수 제한·제목 길이 단위 시험 (모델 없이 돌아요)
+ai\.venv\Scripts\python -m unittest discover -s tests
 rem 키가 되는지, 바깥에서 붙는지 (키 값은 화면에 안 보여 줘요)
 ai\.venv\Scripts\python -m server.tools check-keys
 ai\.venv\Scripts\python -m server.tools tunnel-check https://...
@@ -109,6 +111,17 @@ tools\cloudflared.exe tunnel run --url http://127.0.0.1:8000 kidsrhythm
 ### 클라우드 (참고)
 
 `deploy/huggingface`의 세 파일과 `server/`, `ai/songmaker/`, `docs/`를 한 폴더에 모으면 Hugging Face Docker Space로 올릴 수 있어요. 11/12에 CPU upgrade(8코어)로 올렸을 때 한 곡에 20초 안팎 걸렸고, 지금 그 Space는 멈춰 뒀어요 (켜 두면 시간당 $0.03).
+
+## 노래 만들기 한도
+
+앱에 넣은 팀 키는 APK에서 꺼낼 수 있어서, 키가 새도 바깥 AI 요금이 끝없이 나가지 않게 서버가 노래 수를 묶어요 (`server/limits.py`). 바깥 주소로 온 요청만 세고, 같은 PC의 에뮬레이터는 세지 않아요. 넘으면 `429 RATE_LIMITED`가 가요.
+
+| 설정 (환경 변수, `ai-keys.env`에 적어도 돼요) | 기본값 | 뜻 |
+|---|---|---|
+| `KR_SONGS_PER_DAY` | 60 | 하루 전체 곡 수 (한국 시간 자정에 다시 셈, 0이면 제한 없음) |
+| `KR_SONGS_PER_HOUR_PER_IP` | 10 | 같은 IP에서 한 시간에 만드는 곡 수 (0이면 제한 없음) |
+
+지금 몇 곡 만들었는지는 `/v1/health`의 `limits`에서 봐요. Anthropic·ElevenLabs 콘솔의 월 사용 한도도 같이 걸어 두면 더 안전해요.
 
 ## 키 관리
 

@@ -132,7 +132,7 @@ def _clean_line(s: object) -> str:
 
 
 def validate_lyrics(data: dict, nouns: list[str], main: str, melody: str, max_syll: int) -> Lyrics:
-    from songmaker.text import is_blocked
+    from songmaker.text import fit_title, is_blocked
 
     def lines(key: str, n: int) -> list[str]:
         raw = data.get(key)
@@ -144,7 +144,7 @@ def validate_lyrics(data: dict, nouns: list[str], main: str, melody: str, max_sy
 
     v1, ch, v2 = lines("verse1", 4), lines("chorus", 2), lines("verse2", 4)
     outro = _clean_line(data.get("outro"))
-    title = _clean_line(data.get("title"))[:16]
+    title = fit_title(_clean_line(data.get("title")))
     if not outro or not title:
         raise ValueError("outro나 title이 비었음")
     every = v1 + ch + v2 + [outro, title]
@@ -593,7 +593,7 @@ def make_remote_song(audio44: np.ndarray, members, all_members: list[tuple[int, 
     from songmaker.session_song import (FORM as LOCAL_FORM, DEFAULT_MAIN, DEFAULT_MELODY, best_clip, make_spec,
                                         make_title, playable)
     from songmaker.drive import season_of
-    from songmaker.text import CATEGORY_LABELS, pick_nouns, pick_onos
+    from songmaker.text import CATEGORY_LABELS, fit_title, pick_nouns, pick_onos
 
     t_start = time.time()
     progress("WRITE_LYRICS", 0.3)
@@ -687,7 +687,7 @@ def make_remote_song(audio44: np.ndarray, members, all_members: list[tuple[int, 
     speech = {m.member_id: m.speech_sec for m in members}
     song_meta = meta.get("song_metadata") if isinstance(meta, dict) else None
     result = {
-        "title": lyr.title,
+        "title": fit_title(lyr.title),
         "durationMs": int(round(len(stereo) / SR * 1000)),
         "bpm": int(round(real_bpm)),
         "beatType": beat_type,

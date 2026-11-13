@@ -24,7 +24,7 @@ from .drive import DriveProfile, from_speeds, season_of
 from .dsp import SR, add_at, compress, db_to_amp, envelope, filt, limit, pan, reverb_ir
 from .lyrics import josa
 from .mix import active_normalize
-from .text import Analysis, Noun, Ono, Word, pick_nouns, pick_onos
+from .text import Analysis, Noun, Ono, Word, fit_title, pick_nouns, pick_onos
 from .tts import Voice
 from .vocals import Clip, Placer, _targets, extract_clip
 
@@ -383,7 +383,7 @@ def build_lines(song: FormSong, nouns: list[Noun], main: str, melody: str, title
 
 
 def make_title(nouns: list[Noun], day: dt.date) -> str:
-    return f"{nouns[0].text} 노래" if nouns else f"{day.month}월 {day.day}일 드라이브 노래"
+    return fit_title(f"{nouns[0].text} 노래") if nouns else f"{day.month}월 {day.day}일 드라이브"
 
 
 # ---------- 아이 목소리 조각 ----------

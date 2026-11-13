@@ -5,6 +5,7 @@ import re
 from dataclasses import dataclass, asdict
 
 HANGUL = re.compile(r"[가-힣]+")
+TITLE_MAX = 12  # 앱 화면에 들어가는 노래 제목 길이 (띄어쓰기 포함 글자 수)
 
 # 의성어로 자주 쓰는 소리 음절
 ONO_SYLLABLES = set("둥둠쿵붐붕뿡퉁덩뚱통탕짝탁딱착팍짠쾅펑팡땅쨍빵빰칙치츠쉿슥싹찰랄라룰루나따띠딩동댕뚜삐뽀멍꽥퐁띵똑콩팅뚝뿌")
@@ -94,6 +95,15 @@ class Ono:
 
     def as_dict(self) -> dict:
         return asdict(self)
+
+
+def fit_title(title: str, limit: int = TITLE_MAX) -> str:
+    """제목을 limit 글자 안으로 맞춘다. 넘치면 그 안의 마지막 띄어쓰기에서 끊고, 띄어쓰기가 없으면 그냥 자른다."""
+    t = " ".join(str(title or "").split())
+    if len(t) <= limit:
+        return t
+    cut = t[:limit + 1].rfind(" ")
+    return (t[:cut] if cut >= 2 else t[:limit]).strip()
 
 
 def hangul_only(s: str) -> str:
