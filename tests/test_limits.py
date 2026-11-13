@@ -72,8 +72,14 @@ class FitTitleTest(unittest.TestCase):
     def test_띄어쓰기가_없으면_12자에서_자른다(self):
         self.assertEqual(fit_title("아이스크림케이크노래자랑대회"), "아이스크림케이크노래자랑")
 
-    def test_날짜_제목도_12자_안이다(self):
-        self.assertLessEqual(len("12월 31일 드라이브"), 12)
+    def test_날짜_제목은_날짜_더하기_노래다(self):
+        import datetime as dt
+        import importlib.util
+        if importlib.util.find_spec("scipy") is None:
+            self.skipTest("scipy 없음 (서버 환경에서는 돈다)")
+        from songmaker.session_song import make_title
+        self.assertEqual(make_title([], dt.date(2026, 11, 11)), "11월 11일 노래")
+        self.assertLessEqual(len(make_title([], dt.date(2026, 12, 31))), 12)
 
 
 if __name__ == "__main__":

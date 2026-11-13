@@ -383,7 +383,7 @@ def build_lines(song: FormSong, nouns: list[Noun], main: str, melody: str, title
 
 
 def make_title(nouns: list[Noun], day: dt.date) -> str:
-    return fit_title(f"{nouns[0].text} 노래") if nouns else f"{day.month}월 {day.day}일 드라이브"
+    return fit_title(f"{nouns[0].text} 노래") if nouns else f"{day.month}월 {day.day}일 노래"
 
 
 # ---------- 아이 목소리 조각 ----------
