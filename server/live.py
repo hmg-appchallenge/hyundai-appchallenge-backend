@@ -18,10 +18,20 @@ from .audio_io import pcm16_to_float
 from .config import MAX_RECORDING_SEC, SR_IN
 from .speaker import Segment, voiced_part
 
-ENROLLED_MIN_SIM = 0.45  # 등록한 목소리로 보려면 이 정도는 비슷해야 한다
+ENROLLED_MIN_SIM = 0.45  # 등록한 목소리로 확실히 보려면 이 정도는 비슷해야 한다
 ENROLLED_MARGIN = 0.03  # 둘째로 비슷한 사람보다 이만큼은 더 비슷해야 한다
+# 같은 사람이라도 등록할 때와 녹음할 때 마이크·자리가 다르면 0.1~0.4까지 떨어진다 (에뮬레이터 마이크로 재 봄).
+# 다른 사람은 대개 0.25 아래라서, 등록한 가족이 있으면 0.25 이상은 그 가족으로 보고 그보다 낮을 때만 다른 사람으로 본다
+NEW_VOICE_MAX_SIM = 0.25
+NEW_VOICE_MIN_SEC = 1.0  # 등록한 가족이 있을 때 등록 안 한 가족을 새로 세우려면 이만큼 긴 구간이어야 한다
+ADAPT_MIN_SIM = 0.33  # 등록 목소리와 이만큼 닮은 1초 넘는 구간으로 이번 녹음에서의 그 사람 목소리를 익힌다
+ADAPT_SESSION_SIM = 0.60  # 이미 익힌 이번 녹음 목소리와 이만큼 닮아도 익힌다
+ADAPT_MAX_SEC = 4.0  # 이보다 긴 구간은 여러 사람이 이어 말한 게 섞이기 쉬워서 익히는 데 안 쓴다
+# 이번 녹음에서 익힌 목소리는 같은 마이크라 남끼리도 0.4~0.5까지 닮게 나온다 (같은 사람은 0.55~0.9).
+# 그래서 등록 목소리와 같은 잣대로 보려고 이만큼 빼고 비교한다 (0.52 -> 0.25, 0.72 -> 0.45)
+SESSION_OFFSET = 0.27
 CLUSTER_JOIN_SIM = 0.52  # 등록 안 한 목소리 묶음에 넣는 기준
-LOOSE_SIM = 0.30  # 모두 등록한 경우, 이보다 낮으면 모르는 사람
+CLUSTER_PREFER_MARGIN = 0.10  # 애매한 구간은 등록 안 한 목소리 묶음이 이만큼 더 닮을 때만 그쪽으로
 CLUSTER_MERGE_SIM = 0.50  # 완성할 때 등록 안 한 목소리 구간끼리 합치는 기준 (평균 유사도)
 GAP_SKIP_PENDING = 3  # 빠진 조각 뒤로 이만큼 쌓일 때까지 안 오면 잃어버린 것으로 보고 건너뛴다 (2초 조각이면 6초)
 STT_BATCH_SEC = 25.0  # 한 번에 인식할 말소리 길이 (Whisper 창 30초 안)
@@ -87,6 +97,7 @@ class LiveSession:
         self.stream = asr.new_stream() if asr is not None and asr.ready else None  # 실시간 받아쓰기 (없으면 None)
         self.stream_text = ""  # 지난 조각까지 받아쓴 글 (지금 마디)
         self.clusters: list[dict] = []  # 등록 안 한 목소리 묶음: centroid, count, member_id
+        self.adapted: dict[int, np.ndarray] = {}  # 등록한 가족별로 이번 녹음에서 익힌 목소리 (합)
         self.finished = False
         self.last_activity = time.time()
         self.created = time.time()
@@ -101,8 +112,16 @@ class LiveSession:
     def unregistered(self) -> list[Member]:
         return [m for m in self.members if m.embedding is None]
 
+    def _score(self, m: Member, emb: np.ndarray) -> float:
+        """등록 목소리와 이번 녹음에서 익힌 목소리(SESSION_OFFSET만큼 빼서) 중 더 닮은 쪽."""
+        sim = float(emb @ m.embedding)
+        acc = self.adapted.get(m.member_id)
+        if acc is not None:
+            sim = max(sim, float(emb @ (acc / (np.linalg.norm(acc) + 1e-9))) - SESSION_OFFSET)
+        return sim
+
     def _enrolled_sims(self, emb: np.ndarray) -> list[tuple[float, int]]:
-        return sorted(((float(emb @ m.embedding), m.member_id) for m in self.enrolled), reverse=True)
+        return sorted(((self._score(m, emb), m.member_id) for m in self.enrolled), reverse=True)
 
     @staticmethod
     def _confident(sims: list[tuple[float, int]]) -> int | None:
@@ -112,28 +131,56 @@ class LiveSession:
         second = sims[1][0] if len(sims) > 1 else -1.0
         return mid if best >= ENROLLED_MIN_SIM and best - second >= ENROLLED_MARGIN else None
 
-    def identify(self, emb: np.ndarray | None, duration: float) -> int | None:
-        """녹음 중 실시간 판단. 짧은 소리로는 새 묶음을 만들지 않는다 (완성할 때 다시 정리한다)."""
+    def _best_cluster(self, emb: np.ndarray) -> tuple[float, int] | None:
+        scored = [(float(emb @ c["centroid"]), i) for i, c in enumerate(self.clusters)]
+        return max(scored) if scored else None
+
+    def _maybe_adapt(self, mid: int, emb: np.ndarray, duration: float) -> None:
+        """그 가족으로 본 긴 구간이 등록 목소리(또는 이미 익힌 목소리)와 꽤 닮았으면 이번 녹음 목소리로 익힌다.
+        차 안 마이크로 녹음하면 등록할 때와 소리가 달라서, 같은 사람인데 낮게 나오는 걸 녹음 안에서 바로잡는다."""
+        if duration < NEW_VOICE_MIN_SEC or duration > ADAPT_MAX_SEC:
+            return
+        m = next((x for x in self.enrolled if x.member_id == mid), None)
+        if m is None:
+            return
+        acc = self.adapted.get(mid)
+        own = float(emb @ (acc / (np.linalg.norm(acc) + 1e-9))) if acc is not None else -1.0
+        if float(emb @ m.embedding) >= ADAPT_MIN_SIM or own >= ADAPT_SESSION_SIM:
+            self.adapted[mid] = emb.copy() if acc is None else acc + emb
+
+    def identify(self, emb: np.ndarray | None, duration: float, final: bool = True) -> int | None:
+        """누가 말했는지. final은 말소리 구간이 닫힌 것(믿을 만함), 아니면 말하는 중인 조각 일부.
+        등록한 가족이 있으면 애매한 목소리는 가장 닮은 등록 가족으로 보고, 확실히 다른 목소리일 때만
+        등록 안 한 가족을 세운다 (다영님 확인: 혼자 말했는데 등록 안 한 가족 카드가 번갈아 켜지던 것)."""
         if emb is None:
             return None
         sims = self._enrolled_sims(emb)
         mid = self._confident(sims)
+        if mid is None and sims and sims[0][0] >= NEW_VOICE_MAX_SIM:
+            c = self._best_cluster(emb)
+            if c is not None and c[0] >= CLUSTER_JOIN_SIM and c[0] >= sims[0][0] + CLUSTER_PREFER_MARGIN:
+                return self._join(c[1], emb, duration) if final else self.clusters[c[1]]["member_id"]
+            mid = sims[0][1]
         if mid is not None:
+            if final:
+                self._maybe_adapt(mid, emb, duration)
             return mid
         free = self.unregistered
-        if free:
-            scored = sorted(((float(emb @ c["centroid"]), i) for i, c in enumerate(self.clusters)), reverse=True)
-            if scored and scored[0][0] >= CLUSTER_JOIN_SIM:
-                return self._join(scored[0][1], emb, duration)
-            if duration >= 0.8 and len(self.clusters) < len(free):
-                member = free[len(self.clusters)]
-                self.clusters.append({"centroid": emb.copy(), "count": 1, "member_id": member.member_id})
-                return member.member_id
-            if scored:
-                return self.clusters[scored[0][1]]["member_id"]
-        if sims and sims[0][0] >= LOOSE_SIM:
-            return sims[0][1]
-        self.unknown_flag = True
+        if not free:
+            self.unknown_flag = True
+            return None
+        c = self._best_cluster(emb)
+        if c is not None and c[0] >= CLUSTER_JOIN_SIM:
+            # 아무도 등록 안 했으면 예전처럼 말하는 중인 조각으로도 묶음을 다듬는다
+            return self._join(c[1], emb, duration) if final or not self.enrolled else self.clusters[c[1]]["member_id"]
+        # 새 사람: 등록한 가족이 있으면 닫힌 긴 구간으로만 (말하는 중인 짧은 조각은 흔들려서)
+        new_ok = (final and duration >= NEW_VOICE_MIN_SEC) if self.enrolled else duration >= 0.8
+        if new_ok and len(self.clusters) < len(free):
+            member = free[len(self.clusters)]
+            self.clusters.append({"centroid": emb.copy(), "count": 1, "member_id": member.member_id})
+            return member.member_id
+        if c is not None and (c[0] >= NEW_VOICE_MAX_SIM or not self.enrolled):
+            return self.clusters[c[1]]["member_id"]
         return None
 
     def _join(self, idx: int, emb: np.ndarray, duration: float) -> int:
@@ -146,22 +193,39 @@ class LiveSession:
 
     def refine_speakers(self) -> None:
         """완성할 때 모든 구간을 한꺼번에 보고 화자를 다시 정한다.
-        등록한 목소리와 확실히 닮은 구간은 그 사람, 나머지는 비슷한 것끼리 묶어 등록 안 한 가족에게 차례로 붙인다."""
+        1) 등록 목소리와 꽤 닮은 긴 구간으로 이번 녹음에서의 가족 목소리를 다시 익힌다
+        2) 확실히 닮았거나 애매한 구간은 가장 닮은 등록 가족, 등록한 누구와도 안 닮은 구간만
+           비슷한 것끼리 묶어 등록 안 한 가족에게 처음 말한 차례로 붙인다 (1초도 안 되는 묶음은 누군지 모름)"""
         utts = [u for u in self.utterances if u.embedding is not None]
-        rest = []
+        if not utts:
+            return
+        enrolled = self.enrolled
+        self.adapted = {}
+        for u in sorted(utts, key=lambda x: -x.duration):
+            raw = sorted(((float(u.embedding @ m.embedding), m.member_id) for m in enrolled), reverse=True)
+            mid = self._confident(raw) if raw and raw[0][0] >= ENROLLED_MIN_SIM else None
+            if mid is None and raw and raw[0][0] >= ADAPT_MIN_SIM and (len(raw) == 1 or raw[0][0] - raw[1][0] >= ENROLLED_MARGIN):
+                mid = raw[0][1]
+            if mid is not None:
+                self._maybe_adapt(mid, u.embedding, u.duration)
+        gray: list[tuple[Utterance, int, float]] = []
+        rest: list[Utterance] = []
         for u in utts:
-            mid = self._confident(self._enrolled_sims(u.embedding))
+            sims = self._enrolled_sims(u.embedding)
+            mid = self._confident(sims)
             if mid is not None:
                 u.member_id = mid
+            elif sims and sims[0][0] >= NEW_VOICE_MAX_SIM:
+                gray.append((u, sims[0][1], sims[0][0]))
+                u.member_id = sims[0][1]
             else:
                 rest.append(u)
         free = self.unregistered
-        if not rest:
-            return
         if not free:
             for u in rest:
-                sims = self._enrolled_sims(u.embedding)
-                u.member_id = sims[0][1] if sims and sims[0][0] >= LOOSE_SIM else None
+                u.member_id = None
+            return
+        if not rest:
             return
 
         def centroid(group: list[Utterance]) -> np.ndarray:
@@ -184,14 +248,26 @@ class LiveSession:
                 break
             i, j = pair
             groups[i] += groups.pop(j)
+        if enrolled:
+            # 등록한 가족이 있으면 1초도 안 되는 다른 목소리(기침, 잡음, 남의 짧은 말)는 누군지 모름으로 둔다
+            for g in [g for g in groups if sum(u.duration for u in g) < NEW_VOICE_MIN_SEC]:
+                for u in g:
+                    u.member_id = None
+                groups.remove(g)
         groups.sort(key=lambda g: min(u.start for u in g))
-        for k, g in enumerate(groups):
+        cents = []
+        for k, g in enumerate(groups[:len(free)]):
             member = free[k].member_id
-            c = centroid(g)
             for u in g:
-                sims = self._enrolled_sims(u.embedding)
-                own = float(u.embedding @ c) if len(g) > 1 else 0.0
-                u.member_id = sims[0][1] if sims and sims[0][0] > max(own + 0.05, LOOSE_SIM) else member
+                u.member_id = member
+            cents.append((centroid(g), member))
+        # 애매해서 등록 가족으로 둔 구간이 등록 안 한 목소리 묶음과 훨씬 닮았으면 그쪽으로
+        for u, _mid, sim in gray:
+            scored = [(float(u.embedding @ c), m) for c, m in cents]
+            if scored:
+                cs, cm = max(scored)
+                if cs >= CLUSTER_JOIN_SIM and cs >= sim + CLUSTER_PREFER_MARGIN:
+                    u.member_id = cm
 
     # ---------- 조각 ----------
     @property
@@ -246,7 +322,7 @@ class LiveSession:
         if self.vad.speech_now():
             part = voiced_part(x)
             if len(part) >= int(0.8 * SR_IN):
-                mid = self.identify(self.engine.encoder.embed(part), len(part) / SR_IN)
+                mid = self.identify(self.engine.encoder.embed(part), len(part) / SR_IN, final=False)
                 if mid is not None:
                     speaking.add(mid)
                     latest = mid

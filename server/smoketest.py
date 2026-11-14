@@ -109,6 +109,7 @@ def main(argv=None) -> int:
     ap.add_argument("--enroll", default=None)
     ap.add_argument("--out", default=str(ROOT / "agent" / "outbox" / "smoketest.mp3"))
     ap.add_argument("--realtime", action="store_true", help="2초 조각을 실제 시간처럼 2초마다 보낸다")
+    ap.add_argument("--no-song", action="store_true", help="조각만 보내고 완성하기는 부르지 않는다 (노래 생성 비용 없이 화자·단어만 확인)")
     args = ap.parse_args(argv)
     base = args.base.rstrip("/")
     t_start = time.time()
@@ -169,6 +170,11 @@ def main(argv=None) -> int:
     time.sleep(0.5)
     st, dup = jcall("POST", f"{base}/v1/sessions/{sid}/chunks?seq=0", None)
     print("   같은 seq 다시 보내기:", st)
+    if args.no_song:
+        st, _ = jcall("DELETE", f"{base}/v1/sessions/{sid}")
+        print(f"   완성하기 없이 세션 지움: {st}")
+        print(f"끝 ({time.time() - t_start:.1f}초)")
+        return 0
 
     print("4) 완성하기")
     drive = {"speedKmh": [42, 41, 40, 38, 30, 20, 0, 0, 0, 12, 25, 38, 45, 52], "intervalSec": 1.0,
