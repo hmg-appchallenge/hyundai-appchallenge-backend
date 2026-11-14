@@ -1,5 +1,7 @@
 """녹음 세션: 2초 조각을 받는 동안 말소리 구간을 찾아 누가 말했는지와 새 단어를 알아낸다.
 
+단어는 두 길로 찾는다. 조각이 올 때마다 실시간 받아쓰기로 바로 찾아 그 조각 응답에 싣고(화면용, 덜 정확),
+말이 끊겨 구간이 닫히면 Whisper로 구간을 다시 듣는다(정확, 노래 가사에 씀). 같은 단어는 한 번만 보낸다.
 완성할 때는 모아 둔 구간(시간, 화자, 단어)을 그대로 노래 만들기에 넘긴다.
 녹음 원본은 세션이 끝나면(완성·취소·10분 동안 조각 없음) 지운다.
 """
@@ -77,6 +79,9 @@ class LiveSession:
         self.stt_running = False
         self.word_queue: list[dict] = []
         self.seen_words: set[str] = set()
+        asr = getattr(engine, "stream_asr", None)
+        self.stream = asr.new_stream() if asr is not None and asr.ready else None  # 실시간 받아쓰기 (없으면 None)
+        self.stream_text = ""  # 지난 조각까지 받아쓴 글 (지금 마디)
         self.clusters: list[dict] = []  # 등록 안 한 목소리 묶음: centroid, count, member_id
         self.finished = False
         self.last_activity = time.time()
@@ -228,17 +233,40 @@ class LiveSession:
         self.chunks.append(x)
         self.samples += len(x)
         speaking: set[int] = set()
+        latest = None  # 이 조각에서 마지막으로 알아본 사람 (실시간 단어에 붙인다)
         for seg in self.vad.accept(x):
             mid = self._add_utterance(seg)
             if mid is not None and seg.start + len(seg.samples) > chunk_start:
                 speaking.add(mid)
+                latest = mid
         if self.vad.speech_now():
             part = voiced_part(x)
             if len(part) >= int(0.8 * SR_IN):
                 mid = self.identify(self.engine.encoder.embed(part), len(part) / SR_IN)
                 if mid is not None:
                     speaking.add(mid)
+                    latest = mid
+        if self.stream is not None:
+            self._stream_words(x, latest)
         return speaking
+
+    def _stream_words(self, x: np.ndarray, member_id: int | None) -> None:
+        """실시간 받아쓰기에 조각을 넣고, 새로 들린 단어를 이번 응답에 싣는다.
+        글 맨 끝 단어는 다음 조각에서 더 이어질 수 있어서(강아 -> 강아지) 마디가 끝나거나 글이 그대로일 때까지 미룬다."""
+        try:
+            text, end = self.engine.stream_asr.feed(self.stream, x)
+            settled = end or text == self.stream_text
+            self.stream_text = "" if end else text
+            tail = text.rstrip()
+            if not tail:
+                return
+            found = self.engine.stream_notable(text, member_id)
+            if not settled:
+                found = [w for w in found if not tail.endswith(w["text"])]
+            self._queue_words(found)
+        except Exception as e:  # 받아쓰기가 탈이 나도 녹음은 계속 (구간이 닫히면 Whisper가 듣는다)
+            self.log(f"[세션 {self.sid}] 실시간 받아쓰기 멈춤: {type(e).__name__}: {e}")
+            self.stream = None
 
     def _add_utterance(self, seg: Segment) -> int | None:
         emb = self.engine.encoder.embed(seg.samples)
@@ -300,8 +328,12 @@ class LiveSession:
         for _start, _end, u in spans:
             u.words = per[id(u)]
             found_all += self.engine.notable_words(u.words, u.member_id)
+        self._queue_words(found_all)
+
+    def _queue_words(self, found: list[dict]) -> None:
+        """처음 들은 단어만 다음 조각 응답에 실어 보낸다."""
         with self.lock:
-            for w in found_all:
+            for w in found:
                 key = word_key(w["text"], w["kind"])
                 if key not in self.seen_words:
                     self.seen_words.add(key)

@@ -5,7 +5,7 @@ import sys
 import time
 import urllib.request
 
-from .config import AI_DIR, MODELS_DIR, SHERPA_DIR, SHERPA_URLS
+from .config import AI_DIR, MODELS_DIR, SHERPA_DIR, SHERPA_URLS, STREAM_DIR, STREAM_FILES
 
 
 def fetch(url: str, dest, log) -> None:
@@ -34,6 +34,19 @@ def download_all(stt_model: str, log) -> int:
         except Exception as e:
             log(f"  [실패] {name}: {type(e).__name__}: {e}")
             return 1
+    # 실시간 받아쓰기는 없어도 서버가 돈다 (단어가 구간이 닫힌 뒤에 갈 뿐). 못 받아도 멈추지 않는다
+    STREAM_DIR.mkdir(parents=True, exist_ok=True)
+    log("실시간 받아쓰기 모델 확인 중...")
+    for name, url in STREAM_FILES.items():
+        dest = STREAM_DIR / name
+        if dest.exists() and dest.stat().st_size > 0:
+            log(f"  {name} 있음")
+            continue
+        try:
+            fetch(url, dest, log)
+        except Exception as e:
+            log(f"  [실패, 실시간 받아쓰기 없이 계속] {name}: {type(e).__name__}: {e}")
+            break
     if str(AI_DIR) not in sys.path:
         sys.path.insert(0, str(AI_DIR))
     from songmaker.download import download

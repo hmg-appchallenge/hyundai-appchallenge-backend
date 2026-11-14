@@ -22,6 +22,6 @@ pinned: false
 
 | 폴더 | 내용 |
 |---|---|
-| `server/` | HTTP API (FastAPI): 녹음 세션, 목소리 특징, 노래 작업, 외부 AI 호출 |
+| `server/` | HTTP API (FastAPI): 녹음 세션, 실시간 받아쓰기(sherpa-onnx 한국어 스트리밍 zipformer), 목소리 특징, 노래 작업, 외부 AI 호출 |
 | `ai/songmaker/` | 음성 인식(faster-whisper), 형태소 분석(Kiwi), 반주 합성, 노래 조립 |
 | `docs/API.md` | 앱과 서버가 주고받는 형식 |

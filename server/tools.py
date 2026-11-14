@@ -2,6 +2,7 @@
 
 python -m server.tools make-test-audio   : TTS로 아이·엄마 흉내 목소리를 만들어 agent/files 에 넣는다
                                           (test-enroll-a.wav, test-enroll-b.wav, test-session.wav, debug_mic.wav)
+python -m server.tools make-test-audio 대본.txt [fast] : 대본으로 <대본 이름>.wav를 만든다 (fast면 줄 사이를 거의 안 쉬고 <이름>-fast.wav)
 python -m server.tools check-keys        : ai-keys.env의 Claude·ElevenLabs·Supabase 키가 되는지 본다 (값은 안 보여 줌)
 python -m server.tools tunnel-check [주소] : 공개 주소(안 주면 share-server.bat의 임시 주소)로 바깥에서 붙듯이 시험한다 (키 없이 401, 키로 세션 열고 닫기)
 python -m server.tools hf-token-save [초] : 클립보드에 복사한 허깅페이스 토큰을 확인해 hf-token.txt로 저장하고 클립보드를 비운다 (초를 주면 그동안 복사를 기다림, 토큰은 화면에 안 보여 줌)
@@ -12,6 +13,7 @@ python -m server.tools hf-deploy SPACE   : deploy/hf-space.tar를 허깅페이�
 python -m server.tools hf-status SPACE   : Space가 빌드 중인지, 켜졌는지 본다
 python -m server.tools hf-logs SPACE [build|run] : Space 빌드·실행 기록 끝부분을 본다
 python -m server.tools words-probe [파일] [fast] : agent/files 의 녹음을 세션처럼 넣어 들린 말·확신도·가사 단어 여부를 본다
+python -m server.tools live-probe 주소 [파일] : 켜진 서버에 녹음을 앱처럼 2초마다 보내 단어가 언제 오는지 잰다 (완성은 안 부르고 세션을 지움)
 python -m server.tools bench [모델...]    : 이 PC에서 인식·TTS·노래 한 곡이 얼마나 걸리는지 잰다
 python -m server.tools socket-test [heavy] [fix] / socket-stress : Windows 소켓 오류(WinError 10014) 진단
 """
@@ -194,9 +196,13 @@ def read_script(path: Path) -> list[tuple[str, str]]:
     return lines
 
 
-def make_test_audio(script: Path | None = None) -> int:
+def make_test_audio(script: Path | None = None, fast: bool = False) -> int:
     """TTS로 시험용 녹음을 만든다. 대본을 주면 그 대본으로 agent/files/<대본 이름>.wav만 만든다
-    (목소리 등록 파일이 없으면 그것도 만든다). 대본이 없으면 기본 대본으로 test-session.wav와 debug_mic.wav를 만든다."""
+    (목소리 등록 파일이 없으면 그것도 만든다). 대본이 없으면 기본 대본으로 test-session.wav와 debug_mic.wav를 만든다.
+    fast면 줄 사이를 0.12초만 쉬어서(말소리 구간이 끊기지 않게) <대본 이름>-fast.wav로 만든다.
+    줄마다 말한 시간은 같은 이름의 .json에 남긴다 (live-probe가 단어가 몇 초 늦게 왔는지 셀 때 쓴다)."""
+    import json
+
     from songmaker.dsp import SR
     from songmaker.tts import SupertonicTTS, Voice
 
@@ -221,18 +227,25 @@ def make_test_audio(script: Path | None = None) -> int:
         line2 = v.say(ENROLL_LINE_2) * 0.8
         write_wav16k(FILES / fname, np.concatenate([gap(0.5), line, gap(0.6), line2, gap(0.6), line, gap(0.5)]), SR)
         print("만듦:", FILES / fname)
-    parts = [gap(0.6)]
+    pause = 0.12 if fast else 0.9
+    parts, pos, timing = [gap(0.6)], 0.6, []
     cache: dict[str, Voice] = {}
     for who, text in lines:
         if who not in cache:
             cache[who] = voice(who)
         else:
             tts.use_voice(VOICES[who][0])
-        parts += [cache[who].say(text) * 0.8, gap(0.9)]
+        said = cache[who].say(text) * 0.8
+        timing.append({"who": who, "text": text, "start": round(pos, 2), "end": round(pos + len(said) / SR, 2)})
+        parts += [said, gap(pause)]
+        pos += len(said) / SR + pause
+    parts.append(gap(1.0))
     session = np.concatenate(parts)
-    outs = (f"{script.stem}.wav",) if script is not None else ("test-session.wav", "debug_mic.wav")
+    stem = script.stem + ("-fast" if fast else "") if script is not None else None
+    outs = (f"{stem}.wav",) if stem else ("test-session.wav", "debug_mic.wav")
     for fname in outs:
         write_wav16k(FILES / fname, session, SR)
+        (FILES / fname).with_suffix(".json").write_text(json.dumps(timing, ensure_ascii=False, indent=1), encoding="utf-8")
         print("만듦:", FILES / fname, f"({len(session) / SR:.1f}초, {len(lines)}줄)")
     return 0
 
@@ -456,12 +469,15 @@ def words_probe(path: Path, realtime: bool = True) -> int:
 
     from .engines import BaseEngine, RealEngine
     from .live import LiveSession, Member
+    from .stream_asr import StreamAsr
 
     class ProbeEngine(RealEngine):  # TTS 없이 인식에 필요한 것만 불러온다
         def __init__(self):
             BaseEngine.__init__(self, log=print)
             self.kiwi = Kiwi()
             self.stt = Transcriber("large-v3-turbo", MODELS_DIR / "whisper")
+            self.stream_asr = StreamAsr(log=print)
+            print("실시간 받아쓰기:", self.stream_asr.name)
             self._stt_lock = threading.Lock()
             self.ready.set()
 
@@ -489,6 +505,78 @@ def words_probe(path: Path, realtime: bool = True) -> int:
     an = analyze([w for u in utts for w in u.words], "", engine.kiwi)
     print("가사 단어:", ", ".join(dict.fromkeys(n.text for n in an.nouns)) or "없음")
     print("의성어:", ", ".join(dict.fromkeys(o.text for o in an.onos)) or "없음")
+    return 0
+
+
+def live_probe(base: str, path: Path) -> int:
+    """켜진 서버에 녹음 파일을 앱처럼 보내(2초 녹음이 끝날 때마다 조각 하나) 단어가 언제 오는지 잰다.
+    완성하기는 부르지 않고 세션을 지워서 노래 한도와 요금을 쓰지 않는다.
+    같은 이름의 .json(make-test-audio가 남긴 줄별 시간)이 있으면 그 말을 끝내고 몇 초 뒤에 왔는지도 센다."""
+    import json
+    import os
+    import time
+
+    from . import smoketest
+
+    base = base.rstrip("/")
+    if not path.exists():
+        print(f"녹음 파일이 없어요: {path}")
+        return 1
+    if not base.startswith(("http://127.0.0.1", "http://localhost")):
+        from .__main__ import load_keys
+        from .config import KEYS_FILE
+
+        load_keys(KEYS_FILE)
+        smoketest.API_KEY = os.environ.get("KR_API_KEY", "").strip()
+        print("팀 키:", "붙임" if smoketest.API_KEY else "없음 (ai-keys.env에 KR_API_KEY가 없어요)")
+    st, h = smoketest.jcall("GET", base + "/v1/health", timeout=20)
+    print("서버:", st, {k: h.get(k) for k in ("version", "mode", "ready", "vad", "streamAsr")} if isinstance(h, dict) else h)
+    side = path.with_suffix(".json")
+    lines = json.loads(side.read_text(encoding="utf-8")) if side.exists() else []
+    speech = smoketest.read_wav16k(path)
+    audio = np.concatenate([speech, np.zeros(16000 * 6, np.float32)])  # 끝 단어까지 받으려고 조용한 6초를 더 보낸다
+    members = [{"memberId": 1, "instrument": "DRUM", "embedding": None},
+               {"memberId": 2, "instrument": "SHAKER", "embedding": None}]
+    st, s = smoketest.jcall("POST", base + "/v1/sessions", {"members": members})
+    if st != 201:
+        print("세션을 못 열었어요:", st, s)
+        return 1
+    sid = s["sessionId"]
+    print(f"녹음 {len(speech) / 16000:.1f}초 ({path.name}) + 조용한 6초, 2초마다 한 조각")
+    step = 32000
+    arrivals: list[tuple[str, float]] = []
+    t0 = time.time()
+    try:
+        for seq, i in enumerate(range(0, len(audio), step)):
+            time.sleep(max(0.0, t0 + (seq + 1) * 2.0 - time.time()))  # 앱처럼 2초 녹음이 끝나면 보낸다
+            sent = time.time() - t0
+            status, data = smoketest.call("POST", f"{base}/v1/sessions/{sid}/chunks?seq={seq}",
+                                          smoketest.pcm(audio[i:i + step]), "application/octet-stream")
+            now = time.time() - t0
+            if status != 200:
+                print(f"   조각 {seq}: {status} {data[:200]!r}")
+                continue
+            r = json.loads(data.decode("utf-8"))
+            words = [w["text"] for w in r.get("newWords", [])]
+            arrivals += [(w, now) for w in words]
+            print(f"[{now:5.1f}초] 조각 {seq:>2} (응답 {now - sent:.2f}초) 말한 사람={r.get('speaking')} 새 단어={words}",
+                  flush=True)
+    finally:
+        st, _ = smoketest.call("DELETE", f"{base}/v1/sessions/{sid}")
+        print("세션 지움:", st)
+    if arrivals and lines:
+        print("단어가 온 때 (그 말을 끝낸 시각과 비교):")
+        delays = []
+        for word, at in arrivals:
+            said = next((ln for ln in lines if word in ln["text"].replace(" ", "")), None)
+            if said is None:
+                print(f"   {word}: {at:.1f}초 (대본에서 못 찾음)")
+                continue
+            delays.append(at - said["end"])
+            print(f"   {word}: {at:.1f}초 ('{said['text']}' {said['start']:.1f}~{said['end']:.1f}초, {at - said['end']:+.1f}초)")
+        if delays:
+            print(f"말을 끝내고 평균 {np.mean(delays):.1f}초, 가장 늦게 {max(delays):.1f}초 뒤에 옴 ({len(delays)}개)")
+    print(f"받은 단어 {len(arrivals)}개: {', '.join(w for w, _ in arrivals) or '없음'}")
     return 0
 
 
@@ -959,7 +1047,13 @@ def main(argv=None) -> int:
             return 2
         return screen_record(argv[1], argv[2] if len(argv) > 2 else "demo", int(argv[3]) if len(argv) > 3 else 180)
     if argv and argv[0] == "make-test-audio":
-        return make_test_audio(Path(argv[1]) if len(argv) > 1 else None)
+        names = [a for a in argv[1:] if a != "fast"]
+        return make_test_audio(Path(names[0]) if names else None, fast="fast" in argv[1:])
+    if argv and argv[0] == "live-probe":
+        if len(argv) < 2:
+            print("사용: live-probe 주소 [파일] (예: live-probe https://awqdqwd-kidsrhythm-server.hf.space demo-family-fast.wav)")
+            return 2
+        return live_probe(argv[1], FILES / (argv[2] if len(argv) > 2 else "test-session.wav"))
     if argv and argv[0] == "check-keys":
         return check_keys()
     if argv and argv[0] == "tunnel-check":

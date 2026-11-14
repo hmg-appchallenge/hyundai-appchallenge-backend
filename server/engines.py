@@ -5,6 +5,7 @@ MockEngine: 모델 없이 정해진 단어·화자를 흉내 낸다. 앱 연동�
 """
 from __future__ import annotations
 
+import re
 import sys
 import threading
 import time
@@ -22,6 +23,8 @@ if str(AI_DIR) not in sys.path:
 from songmaker.dsp import SR, resample  # noqa: E402
 from songmaker.session_song import MemberData, make_session_song  # noqa: E402
 from songmaker.text import Analysis, Noun, Ono, Word, analyze  # noqa: E402
+
+STREAM_PROB = 0.5  # 실시간 받아쓰기는 단어마다 확신도를 안 줘서 기준값으로 둔다 (낯선 말은 strict로 거른다)
 
 
 class NotReady(Exception):
@@ -52,6 +55,7 @@ class BaseEngine:
     def __init__(self, log=print):
         self.log = log
         self.encoder = SpeakerEncoder(SHERPA_DIR, log=log)
+        self.stream_asr = None  # 실시간 받아쓰기 (RealEngine만 켠다)
         self.live_executor = ThreadPoolExecutor(1, thread_name_prefix="live")
         self.song_executor = ThreadPoolExecutor(1, thread_name_prefix="song")
         self.ready = threading.Event()
@@ -59,6 +63,9 @@ class BaseEngine:
 
     def new_vad(self) -> StreamVad:
         return StreamVad(SHERPA_DIR)
+
+    def stream_notable(self, text: str, member_id: int | None) -> list[dict]:
+        return []
 
     def wait_ready(self, timeout: float) -> None:
         if not self.ready.wait(timeout):
@@ -68,7 +75,8 @@ class BaseEngine:
 
     def status(self) -> dict:
         return {"mode": self.name, "ready": self.ready.is_set() and not self.load_error,
-                "speakerModel": self.encoder.name, "vad": self.new_vad().kind, "error": self.load_error}
+                "speakerModel": self.encoder.name, "vad": self.new_vad().kind,
+                "streamAsr": self.stream_asr.name if self.stream_asr is not None else "off", "error": self.load_error}
 
 
 class RealEngine(BaseEngine):
@@ -80,6 +88,9 @@ class RealEngine(BaseEngine):
         self.stt_model, self.voice_name, self.pitch, self.tts_steps = stt_model, voice, pitch, tts_steps
         self.stt = self.kiwi = self.voice = None
         self._stt_lock = threading.Lock()
+        from .stream_asr import StreamAsr
+
+        self.stream_asr = StreamAsr(log=log)  # 1~2초. 세션보다 먼저 있어야 해서 바로 불러온다
         threading.Thread(target=self._load, name="load-models", daemon=True).start()
 
     def _load(self) -> None:
@@ -120,6 +131,17 @@ class RealEngine(BaseEngine):
         an = self.analyze_words(words, str(member_id) if member_id is not None else "")
         return ([{"text": n.text, "memberId": member_id, "kind": "word"} for n in an.nouns]
                 + [{"text": o.text, "memberId": member_id, "kind": "onomatopoeia"} for o in an.onos])
+
+    def stream_notable(self, text: str, member_id: int | None) -> list[dict]:
+        """실시간 받아쓰기 글(띄어쓰기가 거의 없다)에서 들린 단어를 말한 순서대로 고른다. 사전에 없는 말은 뺀다."""
+        if self.kiwi is None:
+            return []
+        parts = [p for p in re.split(r"[\s.,?!~]+", text) if p]
+        an = analyze([Word(p, 0.0, 0.0, STREAM_PROB) for p in parts], str(member_id) if member_id is not None else "",
+                     self.kiwi, strict=True)
+        found = ([{"text": n.text, "memberId": member_id, "kind": "word"} for n in an.nouns]
+                 + [{"text": o.text, "memberId": member_id, "kind": "onomatopoeia"} for o in an.onos])
+        return sorted(found, key=lambda w: text.find(w["text"]))
 
     def make_song(self, audio16: np.ndarray, utterances: list[Utterance], members: list[Member],
                   drive: dict | None, beat: dict | None, progress, log) -> tuple[np.ndarray, dict]:

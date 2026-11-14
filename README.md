@@ -10,8 +10,8 @@ git clone https://github.com/hmg-appchallenge/hyundai-appchallenge-backend.git k
 
 ## 하는 일
 
-1. 녹음하는 동안 앱이 2초 조각을 보내면, 누가 소리 냈는지(화자 구분)와 새로 들린 단어를 바로 돌려줘요.
-2. 완성하기를 누르면 녹음 전체를 받아쓰고(faster-whisper), 명사와 의성어를 골라요(Kiwi).
+1. 녹음하는 동안 앱이 2초 조각을 보내면, 누가 소리 냈는지(화자 구분)와 새로 들린 단어를 그 조각 응답에 바로 돌려줘요. 단어는 실시간 받아쓰기(sherpa-onnx 한국어 스트리밍 모델, `server/stream_asr.py`)로 먼저 찾고, 말소리 구간이 닫히면 faster-whisper로 다시 들어 더해요.
+2. 완성하기를 누르면 Whisper가 받아쓴 글에서 명사와 의성어를 골라요(Kiwi). 가사에는 이쪽만 써요.
 3. 가사와 제목은 Claude가 가족이 실제로 한 말로 쓰고, 반주와 보컬은 ElevenLabs Music이 주행 속도에 맞는 빠르기로 만들어요. 아이 목소리 조각도 박자에 맞춰 얹어요. 노래 길이는 가족이 말한 양에 따라 1분 안팎(2절)부터 최대 3분(4절)까지예요 (`server/remote_song.py`의 `song_form`).
 4. 앱이 mp3와 가사(줄마다 시간, 강조 위치)를 받아 가면 서버는 지워요.
 
@@ -22,7 +22,7 @@ git clone https://github.com/hmg-appchallenge/hyundai-appchallenge-backend.git k
 
 | 위치 | 내용 |
 |---|---|
-| `server/` | FastAPI 서버. `app.py` 엔드포인트, `live.py` 녹음 세션, `jobs.py` 노래 작업, `remote_song.py` Claude·ElevenLabs, `speaker.py` 화자 구분, `engines.py` 모델, `smoketest.py` 전체 흐름 시험, `tools.py` 진단·배포 도구 |
+| `server/` | FastAPI 서버. `app.py` 엔드포인트, `live.py` 녹음 세션, `stream_asr.py` 실시간 받아쓰기, `jobs.py` 노래 작업, `remote_song.py` Claude·ElevenLabs, `speaker.py` 화자 구분, `engines.py` 모델, `smoketest.py` 전체 흐름 시험, `tools.py` 진단·배포 도구 |
 | `ai/songmaker/` | 받아쓰기·가사·합성 엔진. 서버가 가져다 쓰고, 혼자 돌려 볼 수도 있어요 ([ai/README.md](ai/README.md)) |
 | `docs/API.md` | 앱과 주고받는 형식. 프론트 저장소의 `docs/API.md`와 같은 내용이라 바꿀 때 같이 고쳐요 |
 | `deploy/huggingface/` | Hugging Face Space(Docker)에 올릴 때 쓴 Dockerfile과 Space 설명 |
@@ -61,12 +61,16 @@ rem 시험용 목소리 녹음 만들기 (agent\files에 생겨요)
 ai\.venv\Scripts\python -m server.tools make-test-audio
 rem 원하는 말로 시험 녹음 만들기: 대본 파일에 한 줄씩 'A: 엄마 나 배고파!' (A=아이, B=엄마) → agent\files\<대본 이름>.wav
 ai\.venv\Scripts\python -m server.tools make-test-audio 대본.txt
+rem 줄 사이를 거의 안 쉬는 녹음(<대본 이름>-fast.wav, 줄마다 시간은 .json)
+ai\.venv\Scripts\python -m server.tools make-test-audio 대본.txt fast
+rem 켜진 서버에 녹음을 앱처럼 2초마다 보내 단어가 언제 오는지 재기 (완성은 안 불러서 노래 한도를 안 써요)
+ai\.venv\Scripts\python -m server.tools live-probe https://... 대본-fast.wav
 ai\.venv\Scripts\python -m server.smoketest --base https://... --session agent\files\대본.wav
 rem 켜진 서버에 앱처럼 요청해 보기: 목소리 등록 → 녹음 세션 → 완성 → mp3 받기 → 지우기
 ai\.venv\Scripts\python -m server.smoketest
 rem 바깥 주소로 시험할 때는 팀 키를 ai-keys.env에서 붙여요
 ai\.venv\Scripts\python -m server.smoketest --base https://...
-rem 횟수 제한·제목 길이·팀 키 바꾸기 단위 시험 (모델 없이 돌아요)
+rem 횟수 제한·제목 길이·팀 키 바꾸기·실시간 단어 단위 시험 (모델 없이 돌아요)
 ai\.venv\Scripts\python -m unittest discover -s tests
 rem 키가 되는지, 바깥에서 붙는지 (키 값은 화면에 안 보여 줘요)
 ai\.venv\Scripts\python -m server.tools check-keys

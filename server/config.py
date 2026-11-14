@@ -14,6 +14,13 @@ SHERPA_URLS = {
     SPEAKER_MODEL: "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/" + SPEAKER_MODEL,
     VAD_MODEL: "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/" + VAD_MODEL,
 }
+# 실시간 받아쓰기(한국어 스트리밍 zipformer, 약 130MB). 받은 판(커밋)을 고정해 둔다
+STREAM_DIR = SHERPA_DIR / "ko-stream"
+_STREAM_REPO = ("https://huggingface.co/k2-fsa/sherpa-onnx-streaming-zipformer-korean-2024-06-16/resolve/"
+                "ba6078bca4daf3f0dd37f79d0ab505af71df14a6/")
+STREAM_FILES = {name: _STREAM_REPO + name for name in (
+    "tokens.txt", "encoder-epoch-99-avg-1.int8.onnx", "decoder-epoch-99-avg-1.int8.onnx",
+    "joiner-epoch-99-avg-1.int8.onnx")}
 TMP_DIR = Path(os.environ.get("KR_TMP_DIR") or (ROOT / "server" / "tmp"))
 PID_FILE = ROOT / "agent" / "server.pid"
 KEYS_FILE = ROOT / "ai-keys.env"

@@ -37,7 +37,7 @@ PLACES = set(
 )
 STOP_NOUNS = set(
     "진짜 정말 이번 다음 오늘 내일 어제 지금 여기 거기 저기 이것 저것 그것 무엇 노래 사람 우리 생각 소리 "
-    "마음 시간 정도 하나 둘 셋 처음 이름 친구들 얘기 말씀 "
+    "마음 시간 정도 하나 둘 셋 처음 이름 친구들 얘기 말씀 조금 "
     # Whisper가 조용한 곳에서 지어내는 말 (시청해 주셔서 감사합니다, 구독과 좋아요 등)
     "시청 시청자 구독 영상 자막 뉴스 기자 감사 채널 알림 여러분 제작 후원 광고 방송".split()
 )
@@ -200,7 +200,25 @@ class Analysis:
     meta_only: list[str]
 
 
-def analyze(words: list[Word], member: str, kiwi) -> Analysis:
+_UNKNOWN_IDS: dict[int, int] = {}
+
+
+def _unknown_id(kiwi) -> int:
+    """Kiwi가 사전에 없는 말에 붙이는 형태소 번호. 뜻 없는 글자를 한 번 넣어 알아 둔다."""
+    key = id(kiwi)
+    if key not in _UNKNOWN_IDS:
+        toks = kiwi.tokenize("뷁뛟꿻")
+        _UNKNOWN_IDS[key] = getattr(toks[0], "id", -1) if len(toks) == 1 else -1
+    return _UNKNOWN_IDS[key]
+
+
+def _sure_ono(w: str) -> bool:
+    return w in ONO_WORDS or all(c in ONO_SYLLABLES for c in w)
+
+
+def analyze(words: list[Word], member: str, kiwi, strict: bool = False) -> Analysis:
+    """strict: 실시간 받아쓰기처럼 덜 정확한 글(띄어쓰기 없음, 잘못 들은 말 섞임)에서 고를 때.
+    사전에 없는 말과 다섯 글자 넘는 말은 아는 말일 때만, 의성어는 의성어 음절로만 된 말만 쓴다 (등등·릉릉은 뺀다)."""
     nouns: list[Noun] = []
     onos: list[Ono] = []
     meta: list[str] = []
@@ -213,16 +231,19 @@ def analyze(words: list[Word], member: str, kiwi) -> Analysis:
             continue
         if is_blocked(clean):
             continue
-        if is_onomatopoeia(clean, kiwi):
+        if is_onomatopoeia(clean, kiwi) and (not strict or _sure_ono(clean)):
             onos.append(Ono(clean, ono_role(clean), member, w.start, w.end))
             continue
         nsyl = len(clean)
         for t in kiwi.tokenize(clean):
             form = t.form
             fs, fe = t.start / nsyl, (t.start + t.len) / nsyl
-            if is_onomatopoeia(form, kiwi) and len(form) >= 2:
+            if is_onomatopoeia(form, kiwi) and len(form) >= 2 and (not strict or _sure_ono(form)):
                 onos.append(Ono(form, ono_role(form), member, w.start, w.end, fs, fe))
             elif t.tag in ("NNG", "NNP"):
+                if strict and not is_known(form) and (
+                        t.tag == "NNP" or len(form) > 4 or getattr(t, "id", None) == _unknown_id(kiwi)):
+                    continue
                 if usable_noun(form, w.prob):
                     nouns.append(Noun(form, category_of(form), member, w.start, w.end, fs, fe))
             elif t.tag in ("SL", "SH", "UN"):
