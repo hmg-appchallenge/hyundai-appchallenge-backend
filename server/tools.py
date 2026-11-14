@@ -50,6 +50,66 @@ def write_wav16k(path: Path, x: np.ndarray, sr: int) -> None:
         w.writeframes(pcm.tobytes())
 
 
+def _adb() -> str:
+    """에뮬레이터를 다루는 adb 경로 (ANDROID_HOME, ANDROID_SDK_ROOT, Windows 기본 설치 위치 순서)."""
+    import os
+    import shutil
+
+    exe = "adb.exe" if os.name == "nt" else "adb"
+    for base in (os.environ.get("ANDROID_HOME"), os.environ.get("ANDROID_SDK_ROOT"),
+                 os.path.join(os.environ.get("LOCALAPPDATA", ""), "Android", "Sdk")):
+        if base and (Path(base) / "platform-tools" / exe).exists():
+            return str(Path(base) / "platform-tools" / exe)
+    return shutil.which("adb") or "adb"
+
+
+def screen_record(action: str, name: str = "demo", seconds: int = 180) -> int:
+    """에뮬레이터 화면 녹화 (시연 영상용). start로 켜고, 앱을 조작한 뒤 stop, pull로 agent/outbox에 꺼낸다.
+    소리는 녹화되지 않고, 한 번에 최대 180초다."""
+    import re
+    import subprocess
+    import time
+
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,40}", name):
+        print("이름은 영문, 숫자, _, - 로만 써요")
+        return 2
+    adb, remote = _adb(), f"/data/local/tmp/{name}.mp4"
+
+    def run(*args: str) -> subprocess.CompletedProcess:
+        return subprocess.run([adb, "-e", *args], capture_output=True, text=True, encoding="utf-8", errors="replace")
+
+    def recording() -> bool:
+        return bool(run("shell", "pidof", "screenrecord").stdout.strip())
+
+    if action == "start":
+        run("shell", "pkill", "-INT", "screenrecord")
+        sec = max(1, min(int(seconds), 180))
+        run("shell", f"setsid nohup screenrecord --bit-rate 16000000 --time-limit {sec} {remote} "
+                     "</dev/null >/dev/null 2>&1 &")
+        for _ in range(12):
+            if recording():
+                print(f"녹화 시작: {remote} (최대 {sec}초)")
+                return 0
+            time.sleep(0.25)
+        print("녹화를 시작하지 못했어요")
+        return 1
+    if action == "stop":
+        run("shell", "pkill", "-INT", "screenrecord")
+        for _ in range(40):
+            if not recording():
+                break
+            time.sleep(0.25)
+        print("녹화 멈춤" if not recording() else "아직 녹화가 안 멈췄어요")
+        return 0
+    if action == "pull":
+        out = ROOT / "agent" / "outbox" / f"{name}.mp4"
+        r = run("pull", remote, str(out))
+        print((r.stdout or r.stderr).strip().splitlines()[-1:] or "pull 결과 없음")
+        return r.returncode
+    print("start, stop, pull 중 하나를 써요")
+    return 2
+
+
 def read_script(path: Path) -> list[tuple[str, str]]:
     """대본 파일을 (누가, 말) 목록으로 읽는다. 한 줄에 'A: 엄마 나 배고파!'처럼 쓴다 (A=아이, B=엄마).
     빈 줄과 #으로 시작하는 줄은 건너뛴다."""
@@ -815,6 +875,11 @@ def main(argv=None) -> int:
     except Exception:
         pass
     argv = sys.argv[1:] if argv is None else argv
+    if argv and argv[0] == "screen-record":
+        if len(argv) < 2:
+            print("사용: screen-record start|stop|pull [이름] [초]")
+            return 2
+        return screen_record(argv[1], argv[2] if len(argv) > 2 else "demo", int(argv[3]) if len(argv) > 3 else 180)
     if argv and argv[0] == "make-test-audio":
         return make_test_audio(Path(argv[1]) if len(argv) > 1 else None)
     if argv and argv[0] == "check-keys":
