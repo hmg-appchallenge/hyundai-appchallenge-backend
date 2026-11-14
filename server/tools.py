@@ -4,6 +4,8 @@ python -m server.tools make-test-audio   : TTS로 아이·엄마 흉내 목소�
                                           (test-enroll-a.wav, test-enroll-b.wav, test-session.wav, debug_mic.wav)
 python -m server.tools make-test-audio 대본.txt [fast] : 대본으로 <대본 이름>.wav를 만든다 (fast면 줄 사이를 거의 안 쉬고 <이름>-fast.wav)
 python -m server.tools check-keys        : ai-keys.env의 Claude·ElevenLabs·Supabase 키가 되는지 본다 (값은 안 보여 줌)
+python -m server.tools tts-voices [lang=ko use_cases=... gender=... preview=1] : ElevenLabs 내 목소리와 공유 목소리를 본다 (읽기만)
+python -m server.tools narrate 대본.txt 목소리ID [model=... stability=... speed=... only=...] : 대본 줄마다 내레이션 mp3를 agent/files/narr에 만든다
 python -m server.tools tunnel-check [주소] : 공개 주소(안 주면 share-server.bat의 임시 주소)로 바깥에서 붙듯이 시험한다 (키 없이 401, 키로 세션 열고 닫기)
 python -m server.tools hf-token-save [초] : 클립보드에 복사한 허깅페이스 토큰을 확인해 hf-token.txt로 저장하고 클립보드를 비운다 (초를 주면 그동안 복사를 기다림, 토큰은 화면에 안 보여 줌)
 python -m server.tools kr-key-copy [초]   : 팀 키(KR_API_KEY)를 클립보드에 넣고, 초(기본 90)가 지나면 비운다 (카톡으로 팀원에게 보낼 때, 값은 안 보여 줌)
@@ -639,6 +641,152 @@ def check_keys() -> int:
     return 0 if ok else 1
 
 
+ELEVEN_API = "https://api.elevenlabs.io"
+
+
+def _eleven_key() -> str:
+    import os
+
+    from .__main__ import load_keys
+    from .config import KEYS_FILE
+
+    load_keys(KEYS_FILE)
+    return os.environ.get("ELEVENLABS_API_KEY", "").strip()
+
+
+def _opts(args: list[str]) -> dict[str, str]:
+    return dict(a.split("=", 1) for a in args if "=" in a)
+
+
+def tts_voices(args: list[str]) -> int:
+    """ElevenLabs 내 목소리와 공유 목소리(기본 한국어)를 본다. 읽기만 하고 계정은 바꾸지 않는다.
+    옵션: lang=ko use_cases=informative_educational gender=male age=middle_aged search=영문 sort=cloned_by_count
+          size=40 page=0 preview=1 (preview=1이면 미리 듣기 mp3를 agent/files/voices/에 받는다)"""
+    import urllib.parse
+
+    from .remote_http import request, request_json
+
+    key = _eleven_key()
+    if not key:
+        print("ai-keys.env에 ELEVENLABS_API_KEY가 없어요")
+        return 1
+    o = _opts(args)
+    h = {"xi-api-key": key}
+    status, sub = request_json("GET", ELEVEN_API + "/v1/user/subscription", headers=h)
+    if status == 200 and isinstance(sub, dict):
+        print(f"요금제: {sub.get('tier')}, 글자 {sub.get('character_count')}/{sub.get('character_limit')}")
+    status, data = request_json("GET", ELEVEN_API + "/v1/voices", headers=h)
+    print("\n[내 목소리]")
+    if status == 200 and isinstance(data, dict):
+        for v in data.get("voices") or []:
+            labels = ", ".join(f"{k}={val}" for k, val in (v.get("labels") or {}).items())
+            print(f"  {v.get('voice_id')}  {v.get('name')} ({v.get('category')}) {labels}")
+    else:
+        print(f"  목록 실패 HTTP {status} {str(data)[:200]}")
+    q = {"page_size": o.get("size", "40"), "language": o.get("lang", "ko"), "sort": o.get("sort", "cloned_by_count")}
+    for k in ("use_cases", "gender", "age", "accent", "search", "page", "descriptives", "category"):
+        if k in o:
+            q[k] = o[k]
+    status, data = request_json("GET", ELEVEN_API + "/v1/shared-voices?" + urllib.parse.urlencode(q), headers=h)
+    print(f"\n[공유 목소리] {q}")
+    if status != 200 or not isinstance(data, dict):
+        print(f"  목록 실패 HTTP {status} {str(data)[:300]}")
+        return 1
+    out = FILES / "voices"
+    for v in data.get("voices") or []:
+        rate = v.get("rate")
+        print(f"  {v.get('voice_id')}  {v.get('name')} | {v.get('gender')} {v.get('age')} {v.get('accent')} "
+              f"{v.get('descriptive')} {v.get('use_case')} | 복제 {v.get('cloned_by_count')} "
+              f"1년 {v.get('usage_character_count_1y')} | 무료 {v.get('free_users_allowed')}"
+              + (f" | 배율 {rate}" if rate not in (None, 1, 1.0) else ""))
+        desc = " ".join(str(v.get("description") or "").split())
+        if desc:
+            print(f"      {desc[:160]}")
+        if o.get("preview") == "1" and v.get("preview_url"):
+            st, _hdr, mp3 = request("GET", v["preview_url"], timeout=60)
+            if st == 200:
+                out.mkdir(parents=True, exist_ok=True)
+                (out / f"{v.get('voice_id')}.mp3").write_bytes(mp3)
+    print("더 있음" if data.get("has_more") else "끝")
+    return 0
+
+
+def read_lines(path: Path) -> list[tuple[str, str]]:
+    """'이름: 문장' 줄을 읽는다. 이름은 영문·숫자·_ 만. 빈 줄과 #줄은 건너뛴다."""
+    import re
+
+    out = []
+    for raw in path.read_text(encoding="utf-8-sig").splitlines():
+        s = raw.strip()
+        if not s or s.startswith("#"):
+            continue
+        name, _, text = s.partition(":")
+        name, text = name.strip(), text.strip()
+        if not re.fullmatch(r"[A-Za-z0-9_]{1,40}", name) or not text:
+            raise ValueError(f"대본 줄을 못 읽었어요: {raw!r} (예: 'intro1: 주말 가족 드라이브.')")
+        out.append((name, text))
+    return out
+
+
+def narrate(args: list[str]) -> int:
+    """대본을 ElevenLabs 목소리로 읽어 agent/files/narr/<prefix>_<이름>.mp3로 만든다.
+    사용: narrate 대본.txt 목소리ID [model=eleven_multilingual_v2] [stability=0.5] [similarity=0.75] [style=0]
+          [speed=1.0] [seed=7] [prefix=narr] [only=이름1,이름2] [ctx=1] [lang=ko]
+    ctx=1이면 앞뒤 줄을 previous_text/next_text로 같이 보내 말투를 잇는다 (eleven_v3는 안 보냄)."""
+    import json
+    import time
+
+    from .remote_http import request
+
+    pos = [a for a in args if "=" not in a]
+    if len(pos) < 2:
+        print(narrate.__doc__)
+        return 2
+    key = _eleven_key()
+    if not key:
+        print("ai-keys.env에 ELEVENLABS_API_KEY가 없어요")
+        return 1
+    o = _opts(args)
+    script = Path(pos[0])
+    script = script if script.is_absolute() or script.exists() else FILES / script
+    lines = read_lines(script)
+    voice, model = pos[1], o.get("model", "eleven_multilingual_v2")
+    only = set(filter(None, o.get("only", "").split(",")))
+    prefix = o.get("prefix", "narr")
+    settings = {"stability": float(o.get("stability", 0.5)), "similarity_boost": float(o.get("similarity", 0.75)),
+                "style": float(o.get("style", 0.0)), "use_speaker_boost": True, "speed": float(o.get("speed", 1.0))}
+    out = FILES / "narr"
+    out.mkdir(parents=True, exist_ok=True)
+    total, fails = 0, 0
+    for i, (name, text) in enumerate(lines):
+        if only and name not in only:
+            continue
+        body = {"text": text, "model_id": model, "voice_settings": settings, "seed": int(o.get("seed", 7))}
+        if o.get("lang"):
+            body["language_code"] = o["lang"]
+        if o.get("ctx", "1") == "1" and not model.startswith("eleven_v3"):
+            if i > 0:
+                body["previous_text"] = lines[i - 1][1]
+            if i + 1 < len(lines):
+                body["next_text"] = lines[i + 1][1]
+        url = f"{ELEVEN_API}/v1/text-to-speech/{voice}?output_format=mp3_44100_192"
+        t0 = time.time()
+        status, hdr, data = request("POST", url, {"xi-api-key": key, "Content-Type": "application/json",
+                                                   "Accept": "audio/mpeg"},
+                                    json.dumps(body, ensure_ascii=False).encode("utf-8"), timeout=120)
+        if status == 200 and len(data) > 1000 and (data[:3] == b"ID3" or data[:1] == b"\xff"):
+            path = out / f"{prefix}_{name}.mp3"
+            path.write_bytes(data)
+            cost = hdr.get("character-cost") or hdr.get("x-character-count") or "?"
+            total += len(text)
+            print(f"  {name}: {len(text)}자 -> {path.name} ({len(data) // 1024}KB, 사용 {cost}, {time.time() - t0:.1f}초)")
+        else:
+            fails += 1
+            print(f"  {name}: 실패 HTTP {status} {data[:300].decode('utf-8', 'replace')}")
+    print(f"목소리 {voice}, 모델 {model}, 설정 {settings}: {total}자, 실패 {fails}줄")
+    return 0 if fails == 0 else 1
+
+
 def tunnel_check(base: str | None = None) -> int:
     """공개 주소(안 주면 server-url.txt)로 바깥 요청처럼 붙어 본다. 팀 키 값은 화면에 남기지 않는다."""
     import os
@@ -1056,6 +1204,10 @@ def main(argv=None) -> int:
         return live_probe(argv[1], FILES / (argv[2] if len(argv) > 2 else "test-session.wav"))
     if argv and argv[0] == "check-keys":
         return check_keys()
+    if argv and argv[0] == "tts-voices":
+        return tts_voices(argv[1:])
+    if argv and argv[0] == "narrate":
+        return narrate(argv[1:])
     if argv and argv[0] == "tunnel-check":
         return tunnel_check(argv[1] if len(argv) > 1 else None)
     if argv and argv[0] == "kr-key-copy":
