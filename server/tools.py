@@ -110,6 +110,74 @@ def screen_record(action: str, name: str = "demo", seconds: int = 180) -> int:
     return 2
 
 
+def emu_record(action: str, name: str = "demo", seconds: int = 180) -> int:
+    """에뮬레이터 바깥(PC)에서 화면을 녹화한다 (adb emu screenrecord, webm). 에뮬레이터 안에서 녹화하는
+    screen-record보다 에뮬레이터 부담이 적다. 결과는 agent/outbox/<이름>.webm."""
+    import re
+    import subprocess
+
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,40}", name):
+        print("이름은 영문, 숫자, _, - 로만 써요")
+        return 2
+    adb = _adb()
+    out = ROOT / "agent" / "outbox" / f"{name}.webm"
+    if action == "start":
+        sec = max(1, min(int(seconds), 600))
+        r = subprocess.run([adb, "-e", "emu", "screenrecord", "start", "--time-limit", str(sec),
+                            "--bit-rate", "6000000", str(out)], capture_output=True, text=True,
+                           encoding="utf-8", errors="replace")
+    elif action == "stop":
+        r = subprocess.run([adb, "-e", "emu", "screenrecord", "stop"], capture_output=True, text=True,
+                           encoding="utf-8", errors="replace")
+    else:
+        print("start, stop 중 하나를 써요")
+        return 2
+    msg = (r.stdout + r.stderr).strip().replace("\r", " ").replace("\n", " ")
+    print(f"emu-record {action}: {msg or 'OK'} -> {out}")
+    return 0 if "KO" not in msg else 1
+
+
+APP_PKG = "com.hmgappchallenge.kidsrhythm"
+
+
+def app_prefs(action: str, name: str) -> int:
+    """앱 설정 파일(shared_prefs/<이름>.xml)을 agent/outbox로 꺼내거나(get), agent/files/<이름>.xml을 넣는다(put).
+    시연 영상용 데이터(가족 이름 등)를 준비할 때 쓴다. put은 앱을 먼저 멈춘다 (켜져 있으면 앱이 덮어써서)."""
+    import re
+    import subprocess
+
+    if not re.fullmatch(r"[A-Za-z0-9_]{1,40}", name):
+        print("이름은 영문, 숫자, _ 로만 써요")
+        return 2
+    adb = _adb()
+
+    def run(*args: str) -> subprocess.CompletedProcess:
+        return subprocess.run([adb, "-e", *args], capture_output=True)
+
+    user = run("shell", "am", "get-current-user").stdout.decode(errors="replace").strip() or "0"
+    if action == "get":
+        r = run("exec-out", "run-as", APP_PKG, "--user", user, "cat", f"shared_prefs/{name}.xml")
+        out = ROOT / "agent" / "outbox" / f"{name}.xml"
+        out.write_bytes(r.stdout)
+        print(f"꺼냄: {out} ({len(r.stdout)} bytes, 사용자 {user})")
+        return 0 if r.stdout else 1
+    if action == "put":
+        src = FILES / f"{name}.xml"
+        if not src.exists():
+            print("파일이 없어요:", src)
+            return 1
+        run("shell", "am", "force-stop", APP_PKG)
+        run("push", str(src), f"/data/local/tmp/{name}.xml")
+        r = run("shell", f"cat /data/local/tmp/{name}.xml | run-as {APP_PKG} --user {user} "
+                         f"sh -c 'cat > shared_prefs/{name}.xml'")
+        check = run("exec-out", "run-as", APP_PKG, "--user", user, "cat", f"shared_prefs/{name}.xml").stdout
+        same = check == src.read_bytes()
+        print(f"넣음: shared_prefs/{name}.xml (사용자 {user}, 같은지 {same})" + (f" {r.stderr.decode(errors='replace')}" if r.stderr else ""))
+        return 0 if same else 1
+    print("get, put 중 하나를 써요")
+    return 2
+
+
 def read_script(path: Path) -> list[tuple[str, str]]:
     """대본 파일을 (누가, 말) 목록으로 읽는다. 한 줄에 'A: 엄마 나 배고파!'처럼 쓴다 (A=아이, B=엄마).
     빈 줄과 #으로 시작하는 줄은 건너뛴다."""
@@ -875,6 +943,16 @@ def main(argv=None) -> int:
     except Exception:
         pass
     argv = sys.argv[1:] if argv is None else argv
+    if argv and argv[0] == "emu-record":
+        if len(argv) < 2:
+            print("사용: emu-record start|stop [이름] [초]")
+            return 2
+        return emu_record(argv[1], argv[2] if len(argv) > 2 else "demo", int(argv[3]) if len(argv) > 3 else 180)
+    if argv and argv[0] == "app-prefs":
+        if len(argv) < 3:
+            print("사용: app-prefs get|put 이름 (예: app-prefs get family)")
+            return 2
+        return app_prefs(argv[1], argv[2])
     if argv and argv[0] == "screen-record":
         if len(argv) < 2:
             print("사용: screen-record start|stop|pull [이름] [초]")
