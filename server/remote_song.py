@@ -621,6 +621,55 @@ def overlay_child(track: np.ndarray, sr: int, clips: dict, first_beat: float, bp
 
 
 # ---------- 한 곡 ----------
+LEAD_MS = 150  # 가사 줄을 부르기 시작하기 조금 전에 켠다 (앱이 재생 위치를 띄엄띄엄 읽어도 늦지 않게)
+
+
+def _sylls(text: str) -> list[str]:
+    return [c for c in text if "가" <= c <= "힣" or c.isalnum()]
+
+
+def align_lines(lines: list[str], words: list[tuple[float, float, str]]) -> list[tuple[float, float] | None]:
+    """가사 줄마다 실제로 부른 (시작, 끝) 초. ElevenLabs가 준 단어 시간을 가사 글자와 순서대로 맞춰 본다.
+    못 맞춘 줄은 None. 박자표로 나눈 자리는 노래가 앞당기거나 늦게 부르면 어긋나서 이걸 쓴다."""
+    lt = [(li, c) for li, t in enumerate(lines) for c in _sylls(t)]
+    wt = []
+    for s, e, txt in words:
+        cs = _sylls(txt)
+        step = max(0.0, e - s) / max(1, len(cs))
+        wt += [(s + k * step, s + (k + 1) * step, c) for k, c in enumerate(cs)]
+    n, m = len(lt), len(wt)
+    if not n or not m:
+        return [None] * len(lines)
+    # 글자 편집 거리. 같은 글자면 0, 다르면 1, 빠지거나 더 부르면 1
+    cost = np.zeros((n + 1, m + 1), np.int32)
+    cost[:, 0] = np.arange(n + 1)
+    cost[0, :] = np.arange(m + 1)
+    for i in range(1, n + 1):
+        ci = lt[i - 1][1]
+        for j in range(1, m + 1):
+            cost[i, j] = min(cost[i - 1, j - 1] + (ci != wt[j - 1][2]), cost[i - 1, j] + 1, cost[i, j - 1] + 1)
+    pairs, i, j = [], n, m
+    while i > 0 and j > 0:
+        same = lt[i - 1][1] == wt[j - 1][2]
+        if cost[i, j] == cost[i - 1, j - 1] + (not same):
+            if same:
+                pairs.append((i - 1, j - 1))
+            i, j = i - 1, j - 1
+        elif cost[i, j] == cost[i - 1, j] + 1:
+            i -= 1
+        else:
+            j -= 1
+    spans: list[list[float]] = [[] for _ in lines]
+    for li_pos, wj in pairs:
+        spans[lt[li_pos][0]] += [wt[wj][0], wt[wj][1]]
+    out: list[tuple[float, float] | None] = []
+    for li, t in enumerate(lines):
+        got, total = len(spans[li]) // 2, len(_sylls(t))
+        # 한두 글자만 우연히 같은 줄은 믿지 않는다
+        out.append((min(spans[li]), max(spans[li])) if got and got >= max(2, total * 0.4) else None)
+    return out
+
+
 def _timings(sections: list[Section], first_beat: float, words: list[tuple[float, float, str]]) -> list[dict]:
     items = []
     for s in sections:
@@ -628,15 +677,32 @@ def _timings(sections: list[Section], first_beat: float, words: list[tuple[float
             continue
         slot = s.dur_ms / len(s.lines)
         for i, text in enumerate(s.lines):
-            a = first_beat * 1000 + s.start_ms + i * slot
-            b = a + slot
-            # 노래가 실제로 시작한 시간이 있으면 그쪽으로 맞춘다
+            a = first_beat * 1000 + s.start_ms + i * slot  # 박자표로 나눈 자리 (단어 시간이 없을 때)
+            items.append({"text": text, "startMs": a, "endMs": a + slot, "section": s.kind})
+    sung = align_lines([it["text"] for it in items], words)
+    for it, span in zip(items, sung):
+        if span is not None:
+            it["startMs"] = max(0.0, span[0] * 1000 - LEAD_MS)
+            it["endMs"] = span[1] * 1000 + 500  # 마지막 줄은 다 부른 뒤 조금 더 켜 둔다
+            it["sung"] = True
+        elif words:
+            # 글자로 못 맞춘 줄: 예전처럼 박자표 자리 근처에서 처음 부른 단어로 당긴다
+            a, slot = it["startMs"], it["endMs"] - it["startMs"]
             near = [w for w in words if a - 600 <= w[0] * 1000 <= a + slot * 0.6]
             if near:
-                a = max(a - 600, near[0][0] * 1000 - 120)
-            items.append({"text": text, "startMs": int(round(a)), "endMs": int(round(b)), "section": s.kind})
-    for i in range(len(items) - 1):
-        items[i]["endMs"] = max(items[i]["startMs"] + 300, items[i + 1]["startMs"])
+                it["startMs"] = max(a - 600, near[0][0] * 1000 - LEAD_MS)
+    # 못 맞춘 줄은 앞뒤 맞춘 줄 사이에서 박자표 자리를 그대로 두되 순서가 꼬이지 않게 한다
+    for i in range(1, len(items)):
+        if not items[i].get("sung") and items[i]["startMs"] <= items[i - 1]["startMs"]:
+            items[i]["startMs"] = items[i - 1]["startMs"] + 300
+    for i in range(len(items) - 1, 0, -1):
+        if not items[i - 1].get("sung") and items[i - 1]["startMs"] >= items[i]["startMs"]:
+            items[i - 1]["startMs"] = max(0.0, items[i]["startMs"] - 300)
+    for i, it in enumerate(items):
+        it["startMs"] = int(round(it["startMs"]))
+        nxt = items[i + 1]["startMs"] if i + 1 < len(items) else it["endMs"]
+        it["endMs"] = int(round(max(it["startMs"] + 300, nxt)))
+        it.pop("sung", None)
     return items
 
 
@@ -788,6 +854,8 @@ def make_remote_song(audio44: np.ndarray, members, all_members: list[tuple[int, 
                    None if lyr.reuse is None else round(lyr.reuse, 2), "transcriptLines": len(transcript),
                    "styles": styles, "songId": song_id,
                    "childClips": placed, "season": season, "wordTimes": len(words),
+                   # 가사 맞춤 확인용: ElevenLabs가 준 단어 시간 [시작ms, 끝ms, 단어] (앱은 안 씀)
+                   "sungWords": [[int(round(s * 1000)), int(round(e * 1000)), t] for s, e, t in words[:160]],
                    "songMetadata": song_meta if isinstance(song_meta, dict) else None,
                    "seconds": round(time.time() - t_start, 1),
                    "drive": ({"medianKmh": round(prof.median_kmh, 1), "stops": prof.stops, "pattern": prof.pattern}
