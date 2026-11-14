@@ -32,9 +32,56 @@ LYRICS_MODEL = "claude-sonnet-5-5"
 MUSIC_MODELS = ("music_v2_5", "music_v2", "music_v1")
 MUSIC_TIMEOUT_SEC = 200.0
 
-# (이름, 앱 가사 상자 section, 마디 수, 가사 줄 수). 가사 한 줄 = 2마디
-FORM = [("Intro", "intro", 2, 0), ("Verse 1", "verse", 8, 4), ("Chorus", "chorus", 4, 2),
-        ("Verse 2", "verse", 8, 4), ("Chorus", "chorus", 4, 2), ("Outro", "outro", 2, 1)]
+# 노래 길이 (0.6.0): 가족이 많이 말할수록 절을 늘린다. 어떤 빠르기에서도 3분을 넘지 않게 여유를 둔다
+MAX_SONG_SEC = 180.0
+FORM_LIMIT_SEC = 175.0  # 반주가 계획보다 조금 길게 나와도 3분 안에 들게
+
+
+def song_verses(speech_sec: float) -> int:
+    """가족이 말한 시간(초)으로 절 수를 정한다. 15초 미만 2절, 30초 미만 3절, 그 이상 4절."""
+    return 2 if speech_sec < 15 else 3 if speech_sec < 30 else 4
+
+
+def _build_form(verses: int, double: bool, brk: bool) -> list[tuple[str, str, int, int]]:
+    long = verses >= 4
+    edge = 4 if long else 2
+    form = [("Intro", "intro", edge, 0)]
+    for i in range(1, verses + 1):
+        if brk and i == 3:
+            form.append(("Break", "break", 4, 0))
+        form.append((f"Verse {i}", "verse", 8, 4))
+        twice = double and (long or i == verses)
+        form.append(("Chorus", "chorus", 8 if twice else 4, 4 if twice else 2))
+    form.append(("Outro", "outro", edge, 1))
+    return form
+
+
+def song_form(verses: int, bpm: float, limit_sec: float = FORM_LIMIT_SEC) -> list[tuple[str, str, int, int]]:
+    """노래 구성 (이름, 앱 가사 상자 section, 마디 수, 가사 줄 수). 가사 한 줄 = 2마디.
+    2절: 전주·1절·후렴·2절·후렴·후주 28마디 (110 BPM에서 1분 1초)
+    3절: 3절과 후렴을 더하고 마지막 후렴은 두 번 44마디 (1분 36초)
+    4절: 후렴은 매번 두 번, 3절 앞에 간주, 전주·후주를 4마디로 76마디 (2분 46초)
+    limit_sec를 넘으면 후렴 반복, 간주, 마지막 절 순서로 덜어 낸다 (80 BPM 4절은 56마디 2분 48초)."""
+    bar = 240.0 / bpm
+    verses = max(2, min(4, verses))
+    double = brk = verses >= 3
+    while True:
+        form = _build_form(verses, double, brk and verses >= 4)
+        if sum(b for _, _, b, _ in form) * bar <= limit_sec or (verses <= 2 and not double):
+            return form
+        if double:
+            double = False
+        elif brk and verses >= 4:
+            brk = False
+        else:
+            verses -= 1
+
+
+def form_seconds(form: list[tuple[str, str, int, int]], bpm: float) -> float:
+    return sum(b for _, _, b, _ in form) * 240.0 / bpm
+
+
+FORM = song_form(2, 110)  # 기본(짧은) 구성
 
 SEASON_KO = {"spring": "봄", "summer": "여름", "autumn": "가을", "winter": "겨울"}
 SEASON_STYLES = {"spring": ["ukulele", "light spring mood"], "summer": ["steel drum", "sunny summer mood"],
@@ -81,7 +128,7 @@ def claude_message(prompt: str, system: str | None = None, max_tokens: int = 150
     return text, str(obj.get("model", body["model"]))
 
 
-LYRICS_SYSTEM = """너는 차 뒷좌석의 3~7세 아이와 가족을 위한 동요 작사가야.
+LYRICS_SYSTEM_TEMPLATE = """너는 차 뒷좌석의 3~7세 아이와 가족을 위한 동요 작사가야.
 transcript는 가족이 녹음 중에 실제로 한 말이야 (times는 그 말을 한 횟수). 이 말을 거의 그대로 엮어서 한국어 동요 가사를 만들고, 정해진 JSON으로만 답해.
 
 규칙
@@ -90,13 +137,32 @@ transcript는 가족이 녹음 중에 실제로 한 말이야 (times는 그 말�
 3. words(들린 명사)는 모두 가사에 한 번 이상 넣어.
 4. 잘못 알아들은 것 같은 이상한 말, 무섭거나 슬픈 말, 다치는 말, 어른 말, 욕, 상표는 빼. 사람 이름은 빼거나 "친구"로 바꿔. 엄마·아빠 같은 가족 호칭은 괜찮아.
 5. 한 줄은 2마디에 부른다. 줄마다 공백과 문장부호를 빼고 maxSyllables 글자 이하로. 같은 줄을 되풀이해도 좋아.
-6. verse1과 verse2는 4줄씩, chorus는 2줄, outro는 1줄. chorus는 두 번 똑같이 부른다.
+6. {verse_keys}는 4줄씩, chorus는 2줄, outro는 1줄. chorus는 절마다 똑같이 부른다.{long_hint}
 7. title은 12자 이내로, 가족이 한 말에서 골라. 예: "우리 바다 가자"
 8. drive(주행 정보)는 분위기 참고용이야. 거기 있는 말을 가사에 새로 넣지는 마.
 9. moodStyles는 노래 분위기를 영어 태그 2~3개로 (예: "bouncy", "warm", "sunny"). 장르, 악기, 빠르기는 쓰지 마.
 
-JSON 모양: {"title": "", "verse1": ["", "", "", ""], "chorus": ["", ""], "verse2": ["", "", "", ""], "outro": "", "moodStyles": [""]}
+JSON 모양: {shape}
 JSON 말고 다른 글은 쓰지 마."""
+
+
+def lyrics_system(verses: int = 2) -> str:
+    """가사 규칙. 절 수(verse1~verseN)에 맞춰 6번 규칙과 JSON 모양을 바꾼다."""
+    keys = [f"verse{i}" for i in range(1, verses + 1)]
+    verse_keys = "과 ".join(keys) if verses == 2 else ", ".join(keys)
+    long_hint = (" 절마다 transcript의 다른 부분을 주로 쓰고, 말이 모자라면 앞 절의 줄을 되풀이해도 돼."
+                 if verses > 2 else "")
+    shape = {"title": ""}
+    for i, k in enumerate(keys):
+        shape[k] = ["", "", "", ""]
+        if i == 0:
+            shape["chorus"] = ["", ""]
+    shape.update({"outro": "", "moodStyles": [""]})
+    return (LYRICS_SYSTEM_TEMPLATE.replace("{verse_keys}", verse_keys).replace("{long_hint}", long_hint)
+            .replace("{shape}", json.dumps(shape, ensure_ascii=False)))
+
+
+LYRICS_SYSTEM = lyrics_system(2)
 
 _HANGUL_OR_WORD = re.compile(r"[가-힣A-Za-z0-9]")
 
@@ -115,23 +181,26 @@ def _parse_json(text: str) -> dict:
 @dataclass
 class Lyrics:
     title: str
-    verse1: list[str]
+    verses: list[list[str]]  # 절마다 4줄 (2~4절)
     chorus: list[str]
-    verse2: list[str]
     outro: str
     mood: list[str] = field(default_factory=list)
     source: str = "template"
     reuse: float | None = None  # 가사 낱말 중 실제로 한 말에 있던 비율
 
     def lines(self) -> list[str]:
-        return self.verse1 + self.chorus + self.verse2 + self.chorus + [self.outro]
+        out: list[str] = []
+        for verse in self.verses:
+            out += verse + self.chorus
+        return out + [self.outro]
 
 
 def _clean_line(s: object) -> str:
     return re.sub(r"\s+", " ", str(s or "")).strip().strip('"').strip()
 
 
-def validate_lyrics(data: dict, nouns: list[str], main: str, melody: str, max_syll: int) -> Lyrics:
+def validate_lyrics(data: dict, nouns: list[str], main: str, melody: str, max_syll: int,
+                    verses: int = 2) -> Lyrics:
     from songmaker.text import fit_title, is_blocked
 
     def lines(key: str, n: int) -> list[str]:
@@ -142,12 +211,13 @@ def validate_lyrics(data: dict, nouns: list[str], main: str, melody: str, max_sy
             raise ValueError(f"{key} 줄 수가 모자람")
         return out
 
-    v1, ch, v2 = lines("verse1", 4), lines("chorus", 2), lines("verse2", 4)
+    vs = [lines(f"verse{i}", 4) for i in range(1, verses + 1)]
+    ch = lines("chorus", 2)
     outro = _clean_line(data.get("outro"))
     title = fit_title(_clean_line(data.get("title")))
     if not outro or not title:
         raise ValueError("outro나 title이 비었음")
-    every = v1 + ch + v2 + [outro, title]
+    every = [line for v in vs for line in v] + ch + [outro, title]
     for line in every:
         if syllables(line) > max_syll + 4:
             raise ValueError(f"줄이 너무 김: {line}")
@@ -160,7 +230,7 @@ def validate_lyrics(data: dict, nouns: list[str], main: str, melody: str, max_sy
     if main and main[:2] not in " ".join(ch):
         raise ValueError(f"후렴에 의성어 {main}가 없음")
     mood = [str(m)[:24] for m in (data.get("mood") or data.get("moodStyles") or []) if isinstance(m, str)][:3]
-    return Lyrics(title, v1, ch, v2, outro, mood, "claude")
+    return Lyrics(title, vs, ch, outro, mood, "claude")
 
 
 # 낱말 비교에 쓰는 품사 (조사·어미는 빼서 "가자"와 "가요"를 같은 말로 본다)
@@ -188,7 +258,7 @@ def reuse_ratio(lyr: Lyrics, said_units: set[str], kiwi) -> tuple[float, list[st
 
 def write_lyrics(context: dict, nouns: list[str], main: str, melody: str, max_syll: int, log,
                  said_units: set[str] | None = None, kiwi=None, need: float = 0.9,
-                 floor: float = 0.7) -> tuple[Lyrics | None, str]:
+                 floor: float = 0.7, verses: int = 2) -> tuple[Lyrics | None, str]:
     """Claude로 가사를 받는다. 실제로 한 말을 need 비율 이상 다시 쓰게 하고, 두 번 해도 모자라면
     floor 이상인 것 중 가장 나은 것을 쓴다. 그것도 없으면 (None, 이유)."""
     reason = ""
@@ -197,10 +267,11 @@ def write_lyrics(context: dict, nouns: list[str], main: str, melody: str, max_sy
     best: Lyrics | None = None
     t0 = time.time()
     model = ""
+    system = lyrics_system(verses)
     for _attempt in range(2):
         try:
-            text, model = claude_message(prompt, LYRICS_SYSTEM, max_tokens=1200, timeout=45)
-            lyr = validate_lyrics(_parse_json(text), nouns, main, melody, max_syll)
+            text, model = claude_message(prompt, system, max_tokens=1200 + 300 * (verses - 2), timeout=60)
+            lyr = validate_lyrics(_parse_json(text), nouns, main, melody, max_syll, verses)
         except RemoteError as e:
             return None, str(e)  # 키·네트워크 문제는 다시 해도 같다
         except (ValueError, json.JSONDecodeError) as e:
@@ -263,7 +334,7 @@ def template_lyrics(nouns, main: str, melody: str, title: str, spec) -> Lyrics:
     verses = [ln.text for ln in lines if ln.kind == "verse"]
     chorus = [ln.text for ln in lines if ln.kind in ("chorus1", "chorus2")][:2]
     outro = next((ln.text for ln in lines if ln.kind == "outro"), title)
-    return Lyrics(title, verses[:4], chorus, verses[4:8] or verses[:4], outro, [], "template")
+    return Lyrics(title, [verses[:4], verses[4:8] or verses[:4]], chorus, outro, [], "template")
 
 
 # ---------- ElevenLabs ----------
@@ -277,13 +348,19 @@ class Section:
     dur_ms: int = 0
 
 
-def plan_sections(lyr: Lyrics, bpm: int) -> list[Section]:
+def plan_sections(lyr: Lyrics, bpm: int, form: list[tuple[str, str, int, int]] | None = None) -> list[Section]:
     bar_ms = 240000.0 / bpm
-    texts = {"Intro": [], "Verse 1": lyr.verse1, "Chorus": lyr.chorus, "Verse 2": lyr.verse2, "Outro": [lyr.outro]}
+    form = form or song_form(len(lyr.verses), bpm)
+    texts = {"Intro": [], "Break": [], "Chorus": lyr.chorus, "Outro": [lyr.outro]}
+    for i, verse in enumerate(lyr.verses, 1):
+        texts[f"Verse {i}"] = verse
     out, t = [], 0
-    for name, kind, bars, _n in FORM:
+    for name, kind, bars, n in form:
+        lines = list(texts.get(name, []))
+        if kind == "chorus" and lines and n > len(lines):
+            lines = (lines * (n // len(lines) + 1))[:n]  # 두 번 부르는 후렴
         dur = int(round(bars * bar_ms))
-        out.append(Section(name, kind, bars, list(texts[name]), t, dur))
+        out.append(Section(name, kind, bars, lines, t, dur))
         t += dur
     return out
 
@@ -303,14 +380,15 @@ def music_styles(bpm: int, beat_type: int, swing: bool, season: str, instruments
 
 LOCAL_STYLES = {"intro": ["instrumental intro", "no vocals"], "verse": ["verse", "light arrangement"],
                 "chorus": ["catchy chorus", "kids choir", "hand claps", "fuller arrangement"],
-                "outro": ["outro", "gentle ending", "final chord"]}
+                "outro": ["outro", "gentle ending", "final chord"],
+                "break": ["instrumental break", "no vocals", "hand claps"]}
 
 
 def eleven_body(model: str, sections: list[Section], styles: list[str]) -> dict:
     if model == "music_v1":
         plan = {"positive_global_styles": styles, "negative_global_styles": NEGATIVE_STYLES,
                 "sections": [{"section_name": s.name, "positive_local_styles": LOCAL_STYLES[s.kind],
-                              "negative_local_styles": ["vocals"] if s.kind == "intro" else [],
+                              "negative_local_styles": ["vocals"] if s.kind in ("intro", "break") else [],
                               "duration_ms": s.dur_ms, "lines": s.lines} for s in sections]}
         return {"model_id": model, "composition_plan": plan, "respect_sections_durations": True, "with_timestamps": True}
     chunks = []
@@ -319,7 +397,7 @@ def eleven_body(model: str, sections: list[Section], styles: list[str]) -> dict:
         body = "\n".join(s.lines) if s.lines else "{instrumental}"
         chunks.append({"text": f"[{s.name}]\n{body}", "duration_ms": s.dur_ms,
                        "positive_styles": styles if i == 0 else core + LOCAL_STYLES[s.kind],
-                       "negative_styles": NEGATIVE_STYLES + (["vocals"] if s.kind == "intro" else [])})
+                       "negative_styles": NEGATIVE_STYLES + (["vocals"] if s.kind in ("intro", "break") else [])})
     return {"model_id": model, "composition_plan": {"chunks": chunks}, "with_timestamps": True}
 
 
@@ -627,6 +705,12 @@ def make_remote_song(audio44: np.ndarray, members, all_members: list[tuple[int, 
     said_units.update(x for x in (main, melody) if x)
     # 말한 낱말이 적으면(짧은 녹음) 90%를 지키기 어려워서 기준을 낮춘다
     need = 0.9 if len(said_units) >= 8 else 0.75
+    # 노래 길이: 가족이 말한 시간만큼 절을 늘린다 (최대 3분)
+    spoken = sum(float(getattr(m, "speech_sec", 0.0) or 0.0) for m in members)
+    form = song_form(song_verses(spoken), bpm)
+    verses = sum(1 for _, kind, _, _ in form if kind == "verse")
+    log(f"노래 구성: {verses}절 {sum(b for _, _, b, _ in form)}마디, 약 {form_seconds(form, bpm):.0f}초 "
+        f"(가족이 말한 시간 {spoken:.1f}초)")
     context = {
         "transcript": transcript,
         "words": [{"text": n.text, "kind": CATEGORY_LABELS.get(n.category, "사물")} for n in nouns],
@@ -637,13 +721,16 @@ def make_remote_song(audio44: np.ndarray, members, all_members: list[tuple[int, 
                   "outsideTempC": (drive or {}).get("outsideTempC"),
                   "timeOfDay": None if hour is None else ("아침" if 5 <= hour < 11 else "낮" if hour < 17 else "저녁" if hour < 21 else "밤")},
         "maxSyllables": max_syll,
+        "verses": verses,
     }
     lyr, why = (write_lyrics(context, [n.text for n in nouns], main, melody, max_syll, log,
-                             said_units=said_units, kiwi=kiwi, need=need, floor=min(need, 0.7))
+                             said_units=said_units, kiwi=kiwi, need=need, floor=min(need, 0.7), verses=verses)
                 if os.environ.get("ANTHROPIC_API_KEY") else (None, "Claude 키 없음"))
     if lyr is None:
         log(f"가사: 서술 틀로 대신 ({why})")
         lyr = template_lyrics(nouns, main, melody, make_title(nouns, day), spec)
+    if len(lyr.verses) != verses:  # 서술 틀 가사는 2절이라 구성도 짧게
+        form = song_form(len(lyr.verses), bpm)
 
     progress("SPLIT_VOICES", 0.4)
     clips = {"main": best_clip(audio44, members, onos["main"].text, onos["main"].member, "ono") if onos.get("main") else None,
@@ -655,7 +742,7 @@ def make_remote_song(audio44: np.ndarray, members, all_members: list[tuple[int, 
     spoke = [playable(m.instrument) for m in members if m.member_id in known and m.speech_sec >= 0.5]
     instruments = spoke or [playable(inst) for _mid, inst in all_members]
     styles = music_styles(bpm, beat_type, spec.swing > 0.5, season, instruments, lyr.mood)
-    sections = plan_sections(lyr, bpm)
+    sections = plan_sections(lyr, bpm, form)
     mp3, meta, model, song_id = compose_music(sections, styles, log)
 
     progress("FINISH", 0.85)

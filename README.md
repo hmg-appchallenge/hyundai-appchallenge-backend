@@ -12,7 +12,7 @@ git clone https://github.com/hmg-appchallenge/hyundai-appchallenge-backend.git k
 
 1. 녹음하는 동안 앱이 2초 조각을 보내면, 누가 소리 냈는지(화자 구분)와 새로 들린 단어를 바로 돌려줘요.
 2. 완성하기를 누르면 녹음 전체를 받아쓰고(faster-whisper), 명사와 의성어를 골라요(Kiwi).
-3. 가사와 제목은 Claude가 가족이 실제로 한 말로 쓰고, 반주와 보컬은 ElevenLabs Music이 주행 속도에 맞는 빠르기로 만들어요. 아이 목소리 조각도 박자에 맞춰 얹어요.
+3. 가사와 제목은 Claude가 가족이 실제로 한 말로 쓰고, 반주와 보컬은 ElevenLabs Music이 주행 속도에 맞는 빠르기로 만들어요. 아이 목소리 조각도 박자에 맞춰 얹어요. 노래 길이는 가족이 말한 양에 따라 1분 안팎(2절)부터 최대 3분(4절)까지예요 (`server/remote_song.py`의 `song_form`).
 4. 앱이 mp3와 가사(줄마다 시간, 강조 위치)를 받아 가면 서버는 지워요.
 
 - 바깥 AI에는 받아쓴 글자만 보내요. 녹음 소리와 목소리 특징은 보내지 않고, 서버에 남기지도 않아요 (docs/API.md "기본 원칙").
