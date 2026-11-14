@@ -185,6 +185,69 @@ class StrictFilterTest(unittest.TestCase):
         self.assertIn("부릉부릉", got)
         self.assertIn("둥둥둥", got)
 
+    def test_misheard_real_words_wait_for_whisper(self):
+        # 실시간 받아쓰기가 실제로 잘못 들은 말: 토끼 -> 토기, 공룡 -> 공용. 사전에는 있는 말이라 '아는 말'로 거른다
+        got = self.words("토기가깡충깡충뛰어요. 와큰억이다공용이다. 자루")
+        self.assertEqual(got, ["깡충깡충"])
+
+    def test_animal_sounds(self):
+        got = self.words("고양이가야옹야옹울어요. 비행기가슝슝날아가요")
+        self.assertEqual(got, ["고양이", "야옹야옹", "비행기", "슝슝"])
+
+
+class OnomatopoeiaTest(unittest.TestCase):
+    """현중님 시험(11/14)에서 '고양이가 야옹야옹 울어요'의 야옹야옹이 빠졌다. 인식은 됐는데 의성어로 못 알아봤다."""
+
+    def test_repeated_two_syllable_sounds(self):
+        from songmaker.text import is_onomatopoeia
+
+        for w in ("야옹야옹", "부엉부엉", "깡충깡충", "데굴데굴", "히힝", "슝슝", "멍멍"):
+            self.assertTrue(is_onomatopoeia(w), w)
+
+    @unittest.skipUnless(HAS_KIWI, "Kiwi가 없으면 건너뛴다")
+    def test_whisper_sentence_keeps_meow_but_not_noun_repeats(self):
+        from kiwipiepy import Kiwi
+
+        from songmaker.text import Word, analyze, is_onomatopoeia
+
+        kiwi = Kiwi()
+        an = analyze([Word(t, 0, 0, 0.99) for t in "고양이가 야옹야옹 울어요.".split()], "", kiwi)
+        self.assertEqual([n.text for n in an.nouns], ["고양이"])
+        self.assertEqual([o.text for o in an.onos], ["야옹야옹"])
+        self.assertFalse(is_onomatopoeia("엄마엄마", kiwi))
+
+
+class PaddingTest(unittest.TestCase):
+    """Whisper에는 말소리 구간 앞뒤를 조금 붙여 들려준다 (첫소리가 잘리면 토끼가 안 들리거나 아빠랑이 파랑이 된다)."""
+
+    def test_utterance_audio_has_pre_and_post_roll_without_overlap(self):
+        engine = FakeEngine([])
+        self.addCleanup(engine.live_executor.shutdown, True)
+        engine.stream_asr.ready = False
+        s = LiveSession("t", [Member(1, "DRUM", ME.copy())], engine, log=lambda *_: None)
+        tone = np.sin(2 * np.pi * 300 * np.arange(int(0.4 * SR)) / SR).astype(np.float32) * 0.3
+        x = np.concatenate([quiet(1.0), tone, quiet(0.6), tone, quiet(1.6)])  # 1.0~1.4초, 2.0~2.4초에 말
+        s.add_chunk(0, pcm(x))
+        a, b = s.utterances
+        self.assertAlmostEqual(a.start, 1.0, places=2)
+        self.assertAlmostEqual(a.audio_start, 0.7, places=2)  # 앞 0.3초
+        self.assertAlmostEqual(len(a.audio) / SR, 0.4 + 0.3 + 0.15, places=2)  # 뒤 0.15초
+        self.assertAlmostEqual(b.audio_start, 1.7, places=2)  # 앞 구간이 넘긴 1.55초보다 뒤라 0.3초를 다 붙인다
+        self.assertAlmostEqual(a.duration, 0.4, places=2)  # 말한 시간(노래 길이 계산)은 그대로
+        engine.live_executor.submit(lambda: None).result(timeout=10)
+
+    def test_close_utterances_do_not_share_audio(self):
+        engine = FakeEngine([])
+        self.addCleanup(engine.live_executor.shutdown, True)
+        engine.stream_asr.ready = False
+        s = LiveSession("t", [Member(1, "DRUM", ME.copy())], engine, log=lambda *_: None)
+        tone = np.sin(2 * np.pi * 300 * np.arange(int(0.4 * SR)) / SR).astype(np.float32) * 0.3
+        x = np.concatenate([quiet(1.0), tone, quiet(0.35), tone, quiet(1.0)])  # 쉼이 0.35초뿐
+        s.add_chunk(0, pcm(x))
+        a, b = s.utterances
+        self.assertLessEqual(a.audio_start + len(a.audio) / SR, b.audio_start + 1e-6)
+        engine.live_executor.submit(lambda: None).result(timeout=10)
+
 
 if __name__ == "__main__":
     unittest.main()

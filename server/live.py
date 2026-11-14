@@ -26,6 +26,8 @@ CLUSTER_MERGE_SIM = 0.50  # 완성할 때 등록 안 한 목소리 구간끼리 
 GAP_SKIP_PENDING = 3  # 빠진 조각 뒤로 이만큼 쌓일 때까지 안 오면 잃어버린 것으로 보고 건너뛴다 (2초 조각이면 6초)
 STT_BATCH_SEC = 25.0  # 한 번에 인식할 말소리 길이 (Whisper 창 30초 안)
 STT_GAP_SEC = 0.4  # 구간 사이에 넣는 빈소리
+PRE_ROLL_SEC = 0.3  # VAD는 첫소리(토끼의 ㅌ, 아빠랑의 아)를 늦게 잡을 때가 있어서 Whisper에는 구간 앞을 조금 더 들려준다
+POST_ROLL_SEC = 0.15  # 끝소리도 조금 (바로 이어 말하는 중이면 안 붙인다)
 
 
 def word_key(text: str, kind: str) -> str:
@@ -54,6 +56,7 @@ class Utterance:
     member_id: int | None
     words: list = field(default_factory=list)  # songmaker.text.Word (녹음 전체 기준 시간)
     analyzed: bool = False
+    audio_start: float | None = None  # audio가 녹음에서 시작하는 시간 (앞뒤를 붙여서 start와 다를 수 있다)
 
     @property
     def duration(self) -> float:
@@ -77,6 +80,7 @@ class LiveSession:
         # 음성 인식은 말소리 구간을 모아서 한 번에 한다 (Whisper는 짧은 말도 30초 창 하나를 통째로 계산해서)
         self.stt_pending: list[Utterance] = []
         self.stt_running = False
+        self.heard_until = 0  # Whisper에 넘긴 소리의 끝 (샘플). 다음 구간 앞을 붙일 때 겹치지 않게
         self.word_queue: list[dict] = []
         self.seen_words: set[str] = set()
         asr = getattr(engine, "stream_asr", None)
@@ -268,10 +272,28 @@ class LiveSession:
             self.log(f"[세션 {self.sid}] 실시간 받아쓰기 멈춤: {type(e).__name__}: {e}")
             self.stream = None
 
+    def _slice(self, lo: int, hi: int) -> np.ndarray:
+        """녹음에서 lo~hi 샘플 (받은 조각 끝에서부터 거슬러 찾는다)."""
+        parts, pos = [], self.samples
+        for c in reversed(self.chunks):
+            if pos <= lo:
+                break
+            parts.append(c)
+            pos -= len(c)
+        x = np.concatenate(parts[::-1]) if parts else np.zeros(0, np.float32)
+        return x[max(0, lo - pos):max(0, hi - pos)]
+
     def _add_utterance(self, seg: Segment) -> int | None:
         emb = self.engine.encoder.embed(seg.samples)
         mid = self.identify(emb, len(seg.samples) / SR_IN)
-        u = Utterance(seg.start_sec, seg.end_sec, seg.samples, emb, mid)
+        seg_end = seg.start + len(seg.samples)
+        lo = min(seg.start, max(0, self.heard_until, seg.start - int(PRE_ROLL_SEC * SR_IN)))
+        hi = seg_end if self.vad.speech_now() else max(seg_end, min(self.samples, seg_end + int(POST_ROLL_SEC * SR_IN)))
+        audio = self._slice(lo, hi) if (lo, hi) != (seg.start, seg_end) else seg.samples
+        if len(audio) != hi - lo:  # 녹음에서 못 찾으면 VAD가 준 소리 그대로
+            audio, lo, hi = seg.samples, seg.start, seg_end
+        self.heard_until = max(self.heard_until, hi)
+        u = Utterance(seg.start_sec, seg.end_sec, audio, emb, mid, audio_start=lo / SR_IN)
         self.utterances.append(u)
         self.stt_pending.append(u)
         if not self.stt_running:
@@ -285,7 +307,7 @@ class LiveSession:
             batch, total = [], 0.0
             while self.stt_pending:
                 u = self.stt_pending[0]
-                d = u.duration + STT_GAP_SEC
+                d = len(u.audio) / SR_IN + STT_GAP_SEC
                 if batch and total + d > STT_BATCH_SEC:
                     break
                 batch.append(self.stt_pending.pop(0))
@@ -322,7 +344,7 @@ class LiveSession:
             mid_t = (w.start + w.end) / 2
             # 단어 가운데가 들어 있는 구간, 사이 빈칸이면 가장 가까운 구간
             start, end, u = min(spans, key=lambda s: 0.0 if s[0] <= mid_t <= s[1] else min(abs(mid_t - s[0]), abs(mid_t - s[1])))
-            shift = u.start - start
+            shift = (u.audio_start if u.audio_start is not None else u.start) - start
             per[id(u)].append(type(w)(w.text, max(u.start, w.start + shift), max(u.start, w.end + shift), w.prob))
         found_all = []
         for _start, _end, u in spans:

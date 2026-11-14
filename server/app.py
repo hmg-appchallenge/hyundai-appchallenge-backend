@@ -121,9 +121,12 @@ def create_app(store: Store, api_key: str | None = None, log=print) -> FastAPI:
         except BadAudio as e:
             raise ApiError(400, "BAD_AUDIO", str(e))
         rep = speech_report(x, SHERPA_DIR)
+        # 녹음 전체 크기. 마이크에서 소리가 안 들어오면(에뮬레이터 마이크가 PC 마이크를 못 받을 때) 최대가 -45dB도 안 된다
+        whole = 20 * np.log10(float(np.sqrt(np.mean(np.square(x, dtype=np.float64)))) + 1e-9) if len(x) else -120.0
+        peak = 20 * np.log10(float(np.max(np.abs(x))) + 1e-9) if len(x) else -120.0
         quality = "ok"
         if rep["speechSec"] < MIN_ENROLL_SPEECH_SEC:
-            quality = "too_short"
+            quality = "too_quiet" if peak < -45.0 else "too_short"
         elif rep["levelDb"] < -42.0:
             quality = "too_quiet"
         elif rep["snrDb"] < 8.0:
@@ -131,8 +134,9 @@ def create_app(store: Store, api_key: str | None = None, log=print) -> FastAPI:
         emb = engine.encoder.embed(rep["speech"]) if quality == "ok" else None
         if quality == "ok" and emb is None:
             quality = "too_short"
-        log(f"[목소리 등록] {len(x) / SR_IN:.1f}초 중 말소리 {rep['speechSec']:.1f}초, 크기 {rep['levelDb']:.0f}dB, "
-            f"잡음 대비 {rep['snrDb']:.0f}dB -> {quality} (녹음은 바로 지움)")
+        mic = " (거의 무음: 마이크에서 소리가 안 들어와요)" if peak < -45.0 else ""
+        log(f"[목소리 등록] {len(x) / SR_IN:.1f}초 중 말소리 {rep['speechSec']:.1f}초, 전체 크기 {whole:.0f}dB / 최대 {peak:.0f}dB, "
+            f"말소리 크기 {rep['levelDb']:.0f}dB, 잡음 대비 {rep['snrDb']:.0f}dB -> {quality}{mic} (녹음은 바로 지움)")
         return {"embedding": [round(float(v), 6) for v in emb] if emb is not None else None,
                 "model": engine.encoder.name, "speechSec": rep["speechSec"], "quality": quality}
 
