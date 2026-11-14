@@ -59,6 +59,9 @@ ai\.venv\Scripts\python -m server --download
 ```bat
 rem 시험용 목소리 녹음 만들기 (agent\files에 생겨요)
 ai\.venv\Scripts\python -m server.tools make-test-audio
+rem 원하는 말로 시험 녹음 만들기: 대본 파일에 한 줄씩 'A: 엄마 나 배고파!' (A=아이, B=엄마) → agent\files\<대본 이름>.wav
+ai\.venv\Scripts\python -m server.tools make-test-audio 대본.txt
+ai\.venv\Scripts\python -m server.smoketest --base https://... --session agent\files\대본.wav
 rem 켜진 서버에 앱처럼 요청해 보기: 목소리 등록 → 녹음 세션 → 완성 → mp3 받기 → 지우기
 ai\.venv\Scripts\python -m server.smoketest
 rem 바깥 주소로 시험할 때는 팀 키를 ai-keys.env에서 붙여요

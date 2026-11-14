@@ -50,9 +50,32 @@ def write_wav16k(path: Path, x: np.ndarray, sr: int) -> None:
         w.writeframes(pcm.tobytes())
 
 
-def make_test_audio() -> int:
+def read_script(path: Path) -> list[tuple[str, str]]:
+    """대본 파일을 (누가, 말) 목록으로 읽는다. 한 줄에 'A: 엄마 나 배고파!'처럼 쓴다 (A=아이, B=엄마).
+    빈 줄과 #으로 시작하는 줄은 건너뛴다."""
+    lines = []
+    for raw in path.read_text(encoding="utf-8-sig").splitlines():
+        s = raw.strip()
+        if not s or s.startswith("#"):
+            continue
+        who, _, text = s.partition(":")
+        who, text = who.strip().upper(), text.strip()
+        if who not in VOICES or not text:
+            raise ValueError(f"대본 줄을 못 읽었어요: {raw!r} (예: 'A: 엄마 나 배고파!')")
+        lines.append((who, text))
+    return lines
+
+
+def make_test_audio(script: Path | None = None) -> int:
+    """TTS로 시험용 녹음을 만든다. 대본을 주면 그 대본으로 agent/files/<대본 이름>.wav만 만든다
+    (목소리 등록 파일이 없으면 그것도 만든다). 대본이 없으면 기본 대본으로 test-session.wav와 debug_mic.wav를 만든다."""
     from songmaker.dsp import SR
     from songmaker.tts import SupertonicTTS, Voice
+
+    lines = SESSION
+    if script is not None:
+        script = script if script.is_absolute() or script.exists() else FILES / script
+        lines = read_script(script)
 
     tts = SupertonicTTS("F1", MODELS_DIR, steps=10)
 
@@ -63,6 +86,8 @@ def make_test_audio() -> int:
 
     gap = lambda s: np.zeros(int(s * SR), np.float32)  # noqa: E731
     for who, fname in (("A", "test-enroll-a.wav"), ("B", "test-enroll-b.wav")):
+        if script is not None and (FILES / fname).exists():
+            continue
         v = voice(who)
         line = v.say(ENROLL_LINE) * 0.8
         line2 = v.say(ENROLL_LINE_2) * 0.8
@@ -70,16 +95,17 @@ def make_test_audio() -> int:
         print("만듦:", FILES / fname)
     parts = [gap(0.6)]
     cache: dict[str, Voice] = {}
-    for who, text in SESSION:
+    for who, text in lines:
         if who not in cache:
             cache[who] = voice(who)
         else:
             tts.use_voice(VOICES[who][0])
         parts += [cache[who].say(text) * 0.8, gap(0.9)]
     session = np.concatenate(parts)
-    for fname in ("test-session.wav", "debug_mic.wav"):
+    outs = (f"{script.stem}.wav",) if script is not None else ("test-session.wav", "debug_mic.wav")
+    for fname in outs:
         write_wav16k(FILES / fname, session, SR)
-        print("만듦:", FILES / fname, f"({len(session) / SR:.1f}초)")
+        print("만듦:", FILES / fname, f"({len(session) / SR:.1f}초, {len(lines)}줄)")
     return 0
 
 
@@ -790,7 +816,7 @@ def main(argv=None) -> int:
         pass
     argv = sys.argv[1:] if argv is None else argv
     if argv and argv[0] == "make-test-audio":
-        return make_test_audio()
+        return make_test_audio(Path(argv[1]) if len(argv) > 1 else None)
     if argv and argv[0] == "check-keys":
         return check_keys()
     if argv and argv[0] == "tunnel-check":
